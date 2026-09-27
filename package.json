@@ -9,7 +9,8 @@
     "dev": "node --watch src/index.js",
     "bot": "RUN_BOT=true node src/bot.js",
     "seed": "node src/seed.js",
-    "check": "node --check src/index.js && node --check src/db.js && node --check src/telegram.js && node --check public/app.js && node --check public/admin.js"
+    "check": "node --check src/index.js && node --check src/db.js && node --check src/telegram.js && node --check public/app.js && node --check public/admin.js",
+    "migrate:postgres": "node scripts/migrate-sqlite-to-postgres.js"
   },
   "engines": {
     "node": ">=20"
@@ -23,6 +24,7 @@
     "morgan": "^1.10.0",
     "qrcode": "^1.5.4",
     "telegraf": "^4.16.3",
-    "bwip-js": "^4.5.1"
+    "bwip-js": "^4.5.1",
+    "postgres": "^3.4.9"
   }
 }

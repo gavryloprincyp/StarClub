@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
+import postgres from 'postgres';
 import { createRequire } from 'module';
 
 dotenv.config();
@@ -15,6 +16,196 @@ fs.mkdirSync(path.dirname(resolvedDbFile), { recursive: true });
 let innerDb = null;
 let initialized = false;
 let transactionDepth = 0;
+let postgresClient = null;
+let postgresPersistenceReady = false;
+let pendingPostgresSnapshot = null;
+let postgresPersistWorker = null;
+let lastPostgresPersistError = null;
+
+const POSTGRES_STATE_TABLE = 'starclub_database_state';
+const POSTGRES_SYNC_META_TABLE = 'starclub_sync_meta';
+
+function quotePgIdentifier(value) {
+  return `\"${String(value).replace(/\"/g, '\"\"')}\"`;
+}
+
+function quoteSqliteIdentifier(value) {
+  return `\"${String(value).replace(/\"/g, '\"\"')}\"`;
+}
+
+function mapSqliteTypeToPostgres(sqliteType) {
+  const type = String(sqliteType || '').trim().toUpperCase();
+  if (type.includes('BLOB')) return 'BYTEA';
+  if (type.includes('REAL') || type.includes('FLOA') || type.includes('DOUB')) return 'DOUBLE PRECISION';
+  if (type.includes('INT')) return 'BIGINT';
+  if (type.includes('NUM') || type.includes('DEC')) return 'NUMERIC';
+  return 'TEXT';
+}
+
+function normalizePgValue(value) {
+  if (value === undefined) return null;
+  if (value instanceof Uint8Array && !Buffer.isBuffer(value)) return Buffer.from(value);
+  return value;
+}
+
+function buildRelationalSnapshot() {
+  ensureDb();
+  const tableListResult = innerDb.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+  const tableNames = (tableListResult?.[0]?.values || []).map((row) => String(row[0]));
+  const tables = [];
+
+  for (const tableName of tableNames) {
+    const tableIdent = quoteSqliteIdentifier(tableName);
+    const info = innerDb.exec(`PRAGMA table_info(${tableIdent})`);
+    const columns = (info?.[0]?.values || []).map((row) => ({
+      name: String(row[1]),
+      sqliteType: String(row[2] || ''),
+      pgType: mapSqliteTypeToPostgres(row[2])
+    }));
+    if (!columns.length) continue;
+
+    const selected = innerDb.exec(`SELECT * FROM ${tableIdent}`);
+    const rows = (selected?.[0]?.values || []).map((row) => row.map(normalizePgValue));
+    tables.push({ name: tableName, columns, rows });
+  }
+
+  return tables;
+}
+
+async function syncRelationalTablesToPostgres(sql, tables, checksum) {
+  for (const table of tables) {
+    const tableIdent = quotePgIdentifier(table.name);
+    const columnDefs = table.columns
+      .map((column) => `${quotePgIdentifier(column.name)} ${column.pgType}`)
+      .join(', ');
+
+    await sql.unsafe(`CREATE TABLE IF NOT EXISTS ${tableIdent} (${columnDefs})`);
+
+    for (const column of table.columns) {
+      await sql.unsafe(
+        `ALTER TABLE ${tableIdent} ADD COLUMN IF NOT EXISTS ${quotePgIdentifier(column.name)} ${column.pgType}`
+      );
+    }
+
+    await sql.unsafe(`TRUNCATE TABLE ${tableIdent}`);
+
+    if (!table.rows.length) continue;
+
+    const columnList = table.columns.map((column) => quotePgIdentifier(column.name)).join(', ');
+    const columnCount = table.columns.length;
+    const batchSize = Math.max(1, Math.min(250, Math.floor(60000 / Math.max(1, columnCount))));
+
+    for (let offset = 0; offset < table.rows.length; offset += batchSize) {
+      const batch = table.rows.slice(offset, offset + batchSize);
+      const params = [];
+      const valueGroups = batch.map((row) => {
+        const placeholders = row.map((value) => {
+          params.push(normalizePgValue(value));
+          return `$${params.length}`;
+        });
+        return `(${placeholders.join(', ')})`;
+      });
+      await sql.unsafe(
+        `INSERT INTO ${tableIdent} (${columnList}) VALUES ${valueGroups.join(', ')}`,
+        params
+      );
+    }
+  }
+
+  const counts = Object.fromEntries(tables.map((table) => [table.name, table.rows.length]));
+  await sql.unsafe(`
+    INSERT INTO ${POSTGRES_SYNC_META_TABLE}(id, sqlite_checksum_sha256, table_counts_json, synced_at)
+    VALUES(1, $1, $2::jsonb, NOW())
+    ON CONFLICT (id) DO UPDATE SET
+      sqlite_checksum_sha256 = EXCLUDED.sqlite_checksum_sha256,
+      table_counts_json = EXCLUDED.table_counts_json,
+      synced_at = NOW()
+  `, [checksum, JSON.stringify(counts)]);
+}
+
+
+function getPostgresUrl() {
+  return String(process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+}
+
+async function connectPostgresPersistence() {
+  const connectionString = getPostgresUrl();
+  if (!connectionString) return null;
+
+  postgresClient = postgres(connectionString, {
+    max: Number(process.env.PG_POOL_MAX || 2),
+    prepare: false
+  });
+
+  await postgresClient`SELECT 1`;
+  await postgresClient.unsafe(`
+    CREATE TABLE IF NOT EXISTS ${POSTGRES_STATE_TABLE} (
+      id SMALLINT PRIMARY KEY CHECK (id = 1),
+      db_data BYTEA NOT NULL,
+      checksum_sha256 TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await postgresClient.unsafe(`
+    CREATE TABLE IF NOT EXISTS ${POSTGRES_SYNC_META_TABLE} (
+      id SMALLINT PRIMARY KEY CHECK (id = 1),
+      sqlite_checksum_sha256 TEXT NOT NULL,
+      table_counts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  const result = await postgresClient.unsafe(
+    `SELECT db_data, checksum_sha256, updated_at FROM ${POSTGRES_STATE_TABLE} WHERE id = 1`
+  );
+  if (!result.length || !result[0].db_data) return null;
+
+  const data = Buffer.from(result[0].db_data);
+  const actualChecksum = crypto.createHash('sha256').update(data).digest('hex');
+  if (result[0].checksum_sha256 && result[0].checksum_sha256 !== actualChecksum) {
+    throw new Error('PostgreSQL Star Club snapshot checksum mismatch');
+  }
+  return data;
+}
+
+function queuePostgresSnapshot(data) {
+  if (!postgresClient || !postgresPersistenceReady) return;
+  pendingPostgresSnapshot = {
+    data: Buffer.from(data),
+    tables: buildRelationalSnapshot()
+  };
+  if (postgresPersistWorker) return;
+
+  postgresPersistWorker = (async () => {
+    while (pendingPostgresSnapshot) {
+      const snapshot = pendingPostgresSnapshot;
+      pendingPostgresSnapshot = null;
+      const checksum = crypto.createHash('sha256').update(snapshot.data).digest('hex');
+      try {
+        await postgresClient.begin(async (sql) => {
+          await sql.unsafe(`
+            INSERT INTO ${POSTGRES_STATE_TABLE}(id, db_data, checksum_sha256, updated_at)
+            VALUES(1, $1, $2, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+              db_data = EXCLUDED.db_data,
+              checksum_sha256 = EXCLUDED.checksum_sha256,
+              updated_at = NOW()
+          `, [snapshot.data, checksum]);
+
+          await syncRelationalTablesToPostgres(sql, snapshot.tables, checksum);
+        });
+        lastPostgresPersistError = null;
+      } catch (error) {
+        lastPostgresPersistError = error;
+        if (!pendingPostgresSnapshot) pendingPostgresSnapshot = snapshot;
+        console.error('Star Club PostgreSQL persistence failed:', error.message || error);
+        break;
+      }
+    }
+  })().finally(() => {
+    postgresPersistWorker = null;
+  });
+}
 
 function ensureDb() {
   if (!innerDb) throw new Error('Database is not initialized. Call await initDb() first.');
@@ -50,8 +241,9 @@ function convertRow(row = {}) {
 
 function saveDb() {
   ensureDb();
-  const data = innerDb.export();
-  fs.writeFileSync(resolvedDbFile, Buffer.from(data));
+  const data = Buffer.from(innerDb.export());
+  fs.writeFileSync(resolvedDbFile, data);
+  queuePostgresSnapshot(data);
 }
 
 class StatementWrapper {
@@ -931,17 +1123,82 @@ export function seed() {
 
 export async function initDb() {
   if (initialized) return;
+
+  const postgresUrl = getPostgresUrl();
+  const isRailway = Boolean(
+    process.env.RAILWAY_ENVIRONMENT ||
+    process.env.RAILWAY_ENVIRONMENT_NAME ||
+    process.env.RAILWAY_PROJECT_ID ||
+    process.env.RAILWAY_SERVICE_ID
+  );
+  if (isRailway && !postgresUrl) {
+    throw new Error(
+      'PostgreSQL is not connected. Add DATABASE_URL=${{Postgres.DATABASE_URL}} to this backend service in Railway Variables.'
+    );
+  }
   const wasmPath = require.resolve('sql.js/dist/sql-wasm.wasm');
   const SQL = await initSqlJs({ locateFile: () => wasmPath });
-  if (fs.existsSync(resolvedDbFile) && fs.statSync(resolvedDbFile).size > 0) {
+
+  let postgresSnapshot = null;
+  if (postgresUrl) {
+    try {
+      postgresSnapshot = await connectPostgresPersistence();
+    } catch (error) {
+      try { await postgresClient?.end({ timeout: 2 }); } catch {}
+      postgresClient = null;
+      throw new Error(`PostgreSQL is configured but unavailable: ${error.message || error}`);
+    }
+  }
+
+  if (postgresSnapshot?.length) {
+    innerDb = new SQL.Database(postgresSnapshot);
+    console.log('Star Club database: restored persistent state from PostgreSQL');
+  } else if (fs.existsSync(resolvedDbFile) && fs.statSync(resolvedDbFile).size > 0) {
     innerDb = new SQL.Database(fs.readFileSync(resolvedDbFile));
+    console.log(postgresClient
+      ? 'Star Club database: importing bundled SQLite state into PostgreSQL'
+      : `Star Club database: using local SQLite file ${resolvedDbFile}`);
   } else {
     innerDb = new SQL.Database();
+    console.log(postgresClient
+      ? 'Star Club database: creating a new database and persisting it to PostgreSQL'
+      : 'Star Club database: creating a new local SQLite database');
   }
+
   migrate();
   seed();
   initialized = true;
+  postgresPersistenceReady = Boolean(postgresClient);
   saveDb();
+  await flushDbPersistence();
+
+  if (postgresClient) {
+    const tableCount = buildRelationalSnapshot().length;
+    console.log(`Star Club database: PostgreSQL persistence is ready (${tableCount} relational tables synchronized)`);
+  }
+}
+
+export async function flushDbPersistence() {
+  if (pendingPostgresSnapshot && !postgresPersistWorker && postgresClient && postgresPersistenceReady) {
+    const snapshot = pendingPostgresSnapshot;
+    pendingPostgresSnapshot = null;
+    queuePostgresSnapshot(snapshot.data);
+  }
+  if (postgresPersistWorker) await postgresPersistWorker;
+  if (lastPostgresPersistError) throw lastPostgresPersistError;
+}
+
+export async function closeDb() {
+  if (innerDb) saveDb();
+  try {
+    await flushDbPersistence();
+  } finally {
+    if (postgresClient) {
+      await postgresClient.end({ timeout: 5 });
+      postgresClient = null;
+      postgresPersistenceReady = false;
+    }
+  }
 }
 
 export function logAudit({ actorType, actorId, action, entityType, entityId, payload }) {

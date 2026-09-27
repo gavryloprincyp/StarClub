@@ -8,7 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import bwipjs from 'bwip-js';
-import { initDb, db, nowIso, normalizePhone, randomToken, getOrCreateClientFromTelegram, createSession, getClientBySession, getSetting, awardStars, hashPassword, verifyPassword, getClientAvailableStars, getReservedStars, logAudit, generateCardNumber } from './db.js';
+import { initDb, closeDb, db, nowIso, normalizePhone, randomToken, getOrCreateClientFromTelegram, createSession, getClientBySession, getSetting, awardStars, hashPassword, verifyPassword, getClientAvailableStars, getReservedStars, logAudit, generateCardNumber } from './db.js';
 import { verifyTelegramInitData } from './telegram.js';
 import { startStarClubBot } from './bot.js';
 
@@ -5018,6 +5018,10 @@ app.get('/admin-pc', (req, res) => res.sendFile(path.join(__dirname, '..', 'publ
 app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'admin.html')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
+let runningBot = null;
+let cleanupTimer = null;
+let shuttingDown = false;
+
 const server = app.listen(port, async () => {
   console.log(`Star Club prototype is running on http://localhost:${port}`);
 
@@ -5027,7 +5031,7 @@ const server = app.listen(port, async () => {
   } catch (error) {
     console.error('Star Club client cleanup failed:', error.message || error);
   }
-  const cleanupTimer = setInterval(() => {
+  cleanupTimer = setInterval(() => {
     try {
       const cleanup = runClientCleanup({ actorId: 'system', trigger: 'daily' });
       if (cleanup.deleted) console.log(`Star Club: automatically deleted ${cleanup.deleted} inactive client(s).`);
@@ -5039,15 +5043,32 @@ const server = app.listen(port, async () => {
 
   if (String(process.env.RUN_BOT || 'true') !== 'false') {
     try {
-      const bot = await startStarClubBot();
-      const stop = (signal) => {
-        try { bot.stop(signal); } catch {}
-        server.close(() => process.exit(0));
-      };
-      process.once('SIGINT', () => stop('SIGINT'));
-      process.once('SIGTERM', () => stop('SIGTERM'));
+      runningBot = await startStarClubBot();
     } catch (error) {
       console.error('Telegram bot was not started:', error.message || error);
     }
   }
 });
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (cleanupTimer) clearInterval(cleanupTimer);
+  try { runningBot?.stop(signal); } catch {}
+
+  const finish = async () => {
+    try {
+      await closeDb();
+      console.log(`Star Club database flushed before ${signal}`);
+      process.exit(0);
+    } catch (error) {
+      console.error('Star Club database shutdown flush failed:', error.message || error);
+      process.exit(1);
+    }
+  };
+
+  server.close(() => { void finish(); });
+}
+
+process.once('SIGINT', () => { void shutdown('SIGINT'); });
+process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
