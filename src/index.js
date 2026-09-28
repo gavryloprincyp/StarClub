@@ -25,7 +25,7 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '16mb' }));
 app.use(morgan('dev'));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -668,6 +668,19 @@ function productCatalogRowByCode(value) {
 
 function normalizeProductBarcode(value) {
   return String(value ?? '').trim().replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+}
+
+function detectProductImageMime(buffer) {
+  if (!buffer || buffer.length < 4) return null;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
+  if (buffer.slice(0, 6).toString('ascii') === 'GIF87a' || buffer.slice(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
+  if (buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+function productImageRoute(productId) {
+  return `/api/catalog/products/${encodeURIComponent(String(productId))}/image`;
 }
 
 function productBarcodeLookupVariants(value) {
@@ -3395,6 +3408,60 @@ function handleOneCReturn(req, res) {
   res.json({ ok: true, return_id: body.id, stars_canceled: starsToCancel, balance: fresh.stars_balance });
 }
 app.post('/api/1c/returns', oneCAuth, handleOneCReturn);
+
+app.get('/api/catalog/products/:id/image', (req, res) => {
+  const productId = normalizeOneCCode(req.params.id);
+  if (!productId) return res.status(404).end();
+  const row = db.prepare('SELECT mime_type, image_data FROM product_images WHERE product_id = ? LIMIT 1').get(productId);
+  if (!row?.image_data) return res.status(404).end();
+  const imageBuffer = Buffer.from(row.image_data);
+  res.set('Cache-Control', 'no-store');
+  res.type(row.mime_type || 'application/octet-stream');
+  return res.send(imageBuffer);
+});
+
+app.post('/api/1c/products/image', oneCAuth, (req, res) => {
+  const productExternalId = normalizeOneCCode(req.body?.external_id || req.body?.product_external_id || req.body?.product_id);
+  if (!productExternalId) return res.status(400).json({ ok: false, error: 'PRODUCT_ID_REQUIRED' });
+
+  const product = db.prepare('SELECT id, external_id FROM products WHERE external_id = ? OR id = ? LIMIT 1').get(productExternalId, productExternalId);
+  if (!product) return res.status(404).json({ ok: false, error: 'PRODUCT_NOT_FOUND' });
+
+  let raw = String(req.body?.image_base64 || req.body?.image || '').trim();
+  const dataUriMatch = raw.match(/^data:image\/[^;]+;base64,(.+)$/i);
+  if (dataUriMatch) raw = dataUriMatch[1];
+  raw = raw.replace(/\s+/g, '');
+  if (!raw) return res.status(400).json({ ok: false, error: 'IMAGE_REQUIRED' });
+  if (raw.length > 14_000_000) return res.status(413).json({ ok: false, error: 'IMAGE_TOO_LARGE' });
+
+  let imageBuffer;
+  try {
+    imageBuffer = Buffer.from(raw, 'base64');
+  } catch {
+    return res.status(400).json({ ok: false, error: 'IMAGE_BASE64_INVALID' });
+  }
+  if (!imageBuffer.length || imageBuffer.length > 10 * 1024 * 1024) {
+    return res.status(413).json({ ok: false, error: 'IMAGE_TOO_LARGE' });
+  }
+
+  const mimeType = detectProductImageMime(imageBuffer);
+  if (!mimeType) return res.status(415).json({ ok: false, error: 'IMAGE_FORMAT_UNSUPPORTED' });
+
+  const t = nowIso();
+  const imageUrl = productImageRoute(product.id);
+  const tx = db.transaction(() => {
+    db.prepare(`INSERT INTO product_images(product_id, mime_type, image_data, updated_at)
+      VALUES(?, ?, ?, ?)
+      ON CONFLICT(product_id) DO UPDATE SET
+        mime_type = excluded.mime_type,
+        image_data = excluded.image_data,
+        updated_at = excluded.updated_at`).run(product.id, mimeType, imageBuffer, t);
+    db.prepare('UPDATE products SET image_url = ?, updated_at = ? WHERE id = ?').run(imageUrl, t, product.id);
+  });
+  tx();
+
+  return res.json({ ok: true, product_id: product.id, image_url: imageUrl, mime_type: mimeType, bytes: imageBuffer.length });
+});
 
 app.post('/api/1c/products/sync', oneCAuth, (req, res) => {
   const products = Array.isArray(req.body?.products) ? req.body.products : [];

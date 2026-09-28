@@ -480,6 +480,13 @@ export function migrate() {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS product_images (
+      product_id TEXT PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+      mime_type TEXT NOT NULL,
+      image_data BLOB NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS star_accrual_exclusions (
       product_external_id TEXT PRIMARY KEY,
       created_at TEXT NOT NULL,
@@ -952,6 +959,7 @@ export function migrate() {
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_product_store_prices_store ON product_store_prices(store_id, product_id)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_product_store_prices_product ON product_store_prices(product_id, store_id)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_product_barcodes_product ON product_barcodes(product_id, barcode)');
+  innerDb.run('CREATE INDEX IF NOT EXISTS idx_product_images_updated ON product_images(updated_at)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_offers_target ON offers(target_type, target_value)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_promo_offers_active ON promo_offers(type, is_active)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_home_banners_active ON home_banners(is_active, sort_order, id)');

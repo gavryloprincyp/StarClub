@@ -11,7 +11,7 @@ function normalizeUrl(value, fallback) {
 
 export function createStarClubBot() {
   const token = process.env.BOT_TOKEN;
-  const webAppUrl = normalizeUrl(process.env.WEBAPP_URL || process.env.APP_URL, 'https://web-production-83a01.up.railway.app');
+  const webAppUrl = 'https://web-production-83a01.up.railway.app';
   const adminUrl = `${webAppUrl}/admin`;
   const adminDesktopUrl = `${webAppUrl}/admin-desktop`;
 
