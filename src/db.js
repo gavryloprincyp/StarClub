@@ -254,27 +254,37 @@ class StatementWrapper {
   _makeStatement(args) {
     ensureDb();
     const stmt = innerDb.prepare(this.sql);
-    const params = normalizeParams(args, this.sql);
-    if (Array.isArray(params)) {
-      if (params.length) stmt.bind(params);
-    } else if (params && typeof params === 'object') {
-      stmt.bind(params);
+    try {
+      const params = normalizeParams(args, this.sql);
+      if (Array.isArray(params)) {
+        if (params.length) stmt.bind(params);
+      } else if (params && typeof params === 'object') {
+        stmt.bind(params);
+      }
+      return stmt;
+    } catch (error) {
+      // Do not leave an open SQLite statement if parameter binding fails.
+      stmt.free();
+      throw error;
     }
-    return stmt;
   }
 
   run(...args) {
     const stmt = this._makeStatement(args);
+    let lastInsertRowid;
+    let changes;
     try {
       while (stmt.step()) {}
       const rows = innerDb.exec('SELECT last_insert_rowid() AS id');
-      const lastInsertRowid = rows?.[0]?.values?.[0]?.[0] ?? 0;
-      const changes = innerDb.getRowsModified();
-      if (transactionDepth === 0) saveDb();
-      return { changes, lastInsertRowid };
+      lastInsertRowid = rows?.[0]?.values?.[0]?.[0] ?? 0;
+      changes = innerDb.getRowsModified();
     } finally {
+      // sql.js export() closes/reopens the SQLite connection. Free all active
+      // statements BEFORE saveDb() so the next request can safely prepare SQL.
       stmt.free();
     }
+    if (transactionDepth === 0) saveDb();
+    return { changes, lastInsertRowid };
   }
 
   get(...args) {
@@ -315,22 +325,34 @@ export const db = {
       const isOuterTransaction = transactionDepth === 0;
       if (isOuterTransaction) innerDb.exec('BEGIN TRANSACTION');
       transactionDepth += 1;
+      let result;
+      let operationError = null;
       try {
-        const result = fn(...args);
-        transactionDepth -= 1;
-        if (isOuterTransaction) {
-          innerDb.exec('COMMIT');
-          saveDb();
-        }
-        return result;
+        result = fn(...args);
+        if (isOuterTransaction) innerDb.exec('COMMIT');
       } catch (error) {
-        transactionDepth -= 1;
+        operationError = error;
         if (isOuterTransaction) {
           try { innerDb.exec('ROLLBACK'); } catch {}
-          saveDb();
         }
-        throw error;
+      } finally {
+        // Always decrement exactly once, including when commit/save fails.
+        // The old code decremented twice if saveDb() threw after COMMIT.
+        transactionDepth -= 1;
       }
+      if (isOuterTransaction) {
+        try {
+          saveDb();
+        } catch (error) {
+          if (operationError) {
+            console.error('Star Club SQLite snapshot after rollback failed:', error);
+          } else {
+            throw error;
+          }
+        }
+      }
+      if (operationError) throw operationError;
+      return result;
     };
   }
 
