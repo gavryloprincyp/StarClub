@@ -291,7 +291,7 @@ function rewardForm(r={},stores=[]){
     <input name="stars_price" type="number" placeholder="Ціна у зірках" value="${esc(r.stars_price||'')}" required>
     <label class="admin-field"><span>Фото з 1С або власне зображення</span><input name="image_url" placeholder="Підтягнеться з 1С або введіть URL" value="${esc(r.image_url||'')}"></label>
     <label class="admin-field"><span>Завантажити фото з комп’ютера</span><input id="rewardImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label>
-    <div class="promo-image-preview"><img id="rewardImagePreview" src="${esc(previewImageUrl(r.image_url||'/assets/star.svg'))}" alt="Фото товару"><div><b>Фото товару</b><p class="small">Якщо власного фото немає, використовується фото з номенклатури 1С.</p></div></div>
+    <div class="promo-image-preview"><img id="rewardImagePreview" src="${esc(previewImageUrl(r.effective_image_url||r.image_url||'/assets/star.svg'))}" alt="Фото товару"><div><b>Фото товару</b><p class="small">Якщо власного фото немає, використовується фото з номенклатури 1С.</p></div></div>
     <label class="admin-field"><span>Магазин з 1С</span><select name="store_id">${pricingStoreOptions(stores,r.store_id||'all',true)}</select></label>
     <input name="per_client_limit" type="number" placeholder="Ліміт на клієнта" value="${esc(r.per_client_limit||1)}">
     <label class="checkline"><input type="checkbox" name="is_active" ${r.id ? (Number(r.is_active)?'checked':'') : 'checked'}> Активний</label>
@@ -341,11 +341,13 @@ async function rewards(editId=null){
       nameInput.value=String(exact.name||'').trim();
       const imageInput=form.elements.image_url;
       if(exact.image_url && (!imageInput.value || imageInput.value==='/assets/star.svg')) {
-        imageInput.value=exact.image_url;
+        // Show the current 1C image without freezing its dynamic URL in the reward record.
         const preview=$('#rewardImagePreview'); if(preview)preview.src=previewImageUrl(exact.image_url);
       }
       lastResolvedCode=code;
-      if(lookupStatus) lookupStatus.textContent=`Знайдено в 1С: ${exact.name||code}`;
+      if(lookupStatus) lookupStatus.textContent=exact.photo_synced_from_1c
+        ? `Знайдено в 1С: ${exact.name||code} · фото синхронізоване`
+        : `Знайдено в 1С: ${exact.name||code} · фото ще не передано. Запустіть синхронізацію фото в 1С.`;
       return exact;
     }catch(error){
       lastResolvedCode='';
@@ -614,7 +616,7 @@ function pricingRuleForm(o={},stores=[]){
     <label class="admin-field"><span>Опис</span><textarea name="description" placeholder="Короткий опис пропозиції">${esc(o.description||'')}</textarea></label>
     <label class="admin-field"><span>Фото</span><input id="pricingImageUrl" name="image_url" value="${esc(o.image_url||'/assets/star.svg')}" placeholder="/assets/item.jpg або https://..."></label>
     <label class="admin-field"><span>Завантажити фото</span><input id="pricingImageFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label>
-    <div class="promo-image-preview"><img id="pricingImagePreview" src="${esc(previewImageUrl(o.image_url||'/assets/star.svg'))}" alt="Попередній перегляд"><div><b>Картка в Mini App</b><p class="small">Для кожного вибраного товару створюється окрема пропозиція.</p></div></div>
+    <div class="promo-image-preview"><img id="pricingImagePreview" src="${esc(previewImageUrl(o.effective_image_url||o.image_url||'/assets/star.svg'))}" alt="Попередній перегляд"><div><b>Картка в Mini App</b><p class="small">Для кожного вибраного товару створюється окрема пропозиція.</p></div></div>
 
     <div class="pricing-target-box">
       <div class="pricing-section-head"><div><b>Товар або група з 1С</b><div class="small">Ціни завантажуються для вибраного магазину.</div></div><span class="pill" id="selectedTargetsCount">0 вибрано</span></div>
@@ -662,7 +664,7 @@ async function pricingRules(editId=null){
   const edit=editId?rules.find(x=>String(x.id)===String(editId)):null;
   content.innerHTML=`${offerAdminTabs()}
     <div class="card editor-card ${edit?'edit-panel':''}"><div class="section-title-row"><div><h3>${edit?'Редагувати пропозицію':'Створити пропозиції'}</h3><p class="small">Фіксована ціна — тільки один товар. Для кількох товарів система створює окрему картку на кожен.</p></div><span class="pill">1С + Mini App</span></div>${pricingRuleForm(edit||{},stores)}</div>
-    <div class="offer-list">${rules.map(o=>{const oldPrice=pricingEffectiveOld(o),newPrice=pricingEffectiveNew(o),saving=oldPrice!==null&&newPrice!==null?Math.max(0,oldPrice-newPrice):null;return `<article class="offer-mobile-card"><div class="offer-card-head"><div><span class="pill">${o.type==='wholesale'?'Оптова':'Клубна'}</span><h3>${esc(o.name)}</h3></div><span>${activeText(o.is_active)}</span></div>${o.image_url?`<img class="pricing-list-image" src="${esc(previewImageUrl(o.image_url))}" alt="${esc(o.name)}">`:''}<p class="small">${esc(o.description||'')}</p><dl><div><dt>Магазин</dt><dd>${esc(o.store_name||o.store_id||'—')}</dd></div><div><dt>Товар</dt><dd><code>${esc(o.target_value||'—')}</code></dd></div><div><dt>Ціна</dt><dd>${oldPrice!==null?`<s>${num(oldPrice/100)} грн</s>`:'—'} → ${newPrice!==null?`<b>${num(newPrice/100)} грн</b>`:'—'}${saving!==null?` · економія ${num(saving/100)} грн`:''}</dd></div></dl><div class="actions">${btn('Редагувати',`data-edit-pricing="${o.id}"`)}${btn('Видалити',`data-delete-pricing="${o.id}" class="danger"`)}</div></article>`;}).join('')||'<div class="card">Цінових правил поки немає</div>'}</div>`;
+    <div class="offer-list">${rules.map(o=>{const oldPrice=pricingEffectiveOld(o),newPrice=pricingEffectiveNew(o),saving=oldPrice!==null&&newPrice!==null?Math.max(0,oldPrice-newPrice):null;return `<article class="offer-mobile-card"><div class="offer-card-head"><div><span class="pill">${o.type==='wholesale'?'Оптова':'Клубна'}</span><h3>${esc(o.name)}</h3></div><span>${activeText(o.is_active)}</span></div>${(o.effective_image_url||o.image_url)?`<img class="pricing-list-image" src="${esc(previewImageUrl(o.effective_image_url||o.image_url))}" alt="${esc(o.name)}">`:''}<p class="small">${esc(o.description||'')}</p><dl><div><dt>Магазин</dt><dd>${esc(o.store_name||o.store_id||'—')}</dd></div><div><dt>Товар</dt><dd><code>${esc(o.target_value||'—')}</code></dd></div><div><dt>Ціна</dt><dd>${oldPrice!==null?`<s>${num(oldPrice/100)} грн</s>`:'—'} → ${newPrice!==null?`<b>${num(newPrice/100)} грн</b>`:'—'}${saving!==null?` · економія ${num(saving/100)} грн`:''}</dd></div></dl><div class="actions">${btn('Редагувати',`data-edit-pricing="${o.id}"`)}${btn('Видалити',`data-delete-pricing="${o.id}" class="danger"`)}</div></article>`;}).join('')||'<div class="card">Цінових правил поки немає</div>'}</div>`;
   bindOfferAdminTabs();
 
   const form=$('#pricingRuleForm'),typeSelect=$('#pricingRuleType'),targetTypeSelect=$('#pricingTargetType'),storeSelect=$('#pricingStoreId'),targetPicker=$('#pricingTargetPicker'),targetSearch=$('#pricingTargetSearch');
@@ -672,7 +674,6 @@ async function pricingRules(editId=null){
     const item=selectedItem();const imageInput=$('#pricingImageUrl');
     if(!item?.image_url||!imageInput)return;
     if(!imageInput.value||imageInput.value==='/assets/star.svg') {
-      imageInput.value=item.image_url;
       $('#pricingImagePreview').src=previewImageUrl(item.image_url);
     }
   };
@@ -729,7 +730,7 @@ function multiplierForm(o={},stores=[]){
     <label class="admin-field"><span>Опис</span><input name="description" value="${esc(o.description||'')}"></label>
     <label class="admin-field"><span>Фото (автоматично з 1С для вибраного товару)</span><input name="image_url" value="${esc(o.image_url||'/assets/star.svg')}" placeholder="Фото URL"></label>
     <label class="admin-field"><span>Завантажити власне фото</span><input id="multiplierImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label>
-    <div class="promo-image-preview"><img id="multiplierImagePreview" src="${esc(previewImageUrl(o.image_url||'/assets/star.svg'))}" alt="Попередній перегляд"><div><b>Зображення множника</b><p class="small">Якщо поле фото не заповнене, Star Club використовує фото товару з 1С.</p></div></div>
+    <div class="promo-image-preview"><img id="multiplierImagePreview" src="${esc(previewImageUrl(o.effective_image_url||o.image_url||'/assets/star.svg'))}" alt="Попередній перегляд"><div><b>Зображення множника</b><p class="small">Якщо поле фото не заповнене, Star Club використовує фото товару з 1С.</p></div></div>
     <label class="admin-field"><span>Код товару або групи з 1С</span><input name="target_ref" value="${esc(o.target_value||o.product_external_id||o.category||'')}" placeholder="ЦБ000004323" required></label>
     <label class="admin-field"><span>Множник зірок</span><input name="stars_multiplier" type="number" min="1" step="0.1" inputmode="decimal" value="${esc(o.stars_multiplier||'')}" placeholder="2" required></label>
     <label class="admin-field"><span>Магазин</span><select name="store_id"><option value="all" ${!o.store_id||o.store_id==='all'?'selected':''}>Усі магазини</option>${pricingStoreOptions(stores,o.store_id||'')}</select></label>
@@ -740,7 +741,7 @@ function multiplierForm(o={},stores=[]){
 async function multipliers(editId=null){
   offerAdminSection='multiplier';title.textContent='Пропозиції та ціни';
   const [{offers:all=[]},{stores=[]}]=await Promise.all([api('/api/admin/catalog/offers'),api('/api/admin/stores')]);const items=all.filter(o=>o.type==='stars_multiplier');const edit=editId?items.find(x=>String(x.id)===String(editId)):null;
-  content.innerHTML=`${offerAdminTabs()}<div class="card editor-card ${edit?'edit-panel':''}"><div class="section-title-row"><div><h3>${edit?'Редагувати множник':'Множник зірок'}</h3><p class="small">Логіку множника залишено окремою та без змін від початкової реалізації.</p></div><span class="pill">★</span></div>${multiplierForm(edit||{},stores)}</div><div class="offer-list">${items.map(o=>`<article class="offer-mobile-card">${o.image_url?`<img class="pricing-list-image" src="${esc(previewImageUrl(o.image_url))}" alt="${esc(o.name)}">`:''}<div class="offer-card-head"><div><span class="pill">Множник</span><h3>${esc(o.name)}</h3></div><span>${activeText(o.is_active)}</span></div><dl><div><dt>Умова</dt><dd>${esc(offerCondition(o))}</dd></div><div><dt>Код 1С</dt><dd><code>${esc(o.target_value||o.product_external_id||o.category||'—')}</code></dd></div><div><dt>Магазин</dt><dd>${esc(o.store_name||o.store_id||'all')}</dd></div></dl><div class="actions">${btn('Редагувати',`data-edit-multiplier="${o.id}"`)}${btn('Видалити',`data-delete-multiplier="${o.id}" class="danger"`)}</div></article>`).join('')||'<div class="card">Множників поки немає</div>'}</div>`;
+  content.innerHTML=`${offerAdminTabs()}<div class="card editor-card ${edit?'edit-panel':''}"><div class="section-title-row"><div><h3>${edit?'Редагувати множник':'Множник зірок'}</h3><p class="small">Логіку множника залишено окремою та без змін від початкової реалізації.</p></div><span class="pill">★</span></div>${multiplierForm(edit||{},stores)}</div><div class="offer-list">${items.map(o=>`<article class="offer-mobile-card">${(o.effective_image_url||o.image_url)?`<img class="pricing-list-image" src="${esc(previewImageUrl(o.effective_image_url||o.image_url))}" alt="${esc(o.name)}">`:''}<div class="offer-card-head"><div><span class="pill">Множник</span><h3>${esc(o.name)}</h3></div><span>${activeText(o.is_active)}</span></div><dl><div><dt>Умова</dt><dd>${esc(offerCondition(o))}</dd></div><div><dt>Код 1С</dt><dd><code>${esc(o.target_value||o.product_external_id||o.category||'—')}</code></dd></div><div><dt>Магазин</dt><dd>${esc(o.store_name||o.store_id||'all')}</dd></div></dl><div class="actions">${btn('Редагувати',`data-edit-multiplier="${o.id}"`)}${btn('Видалити',`data-delete-multiplier="${o.id}" class="danger"`)}</div></article>`).join('')||'<div class="card">Множників поки немає</div>'}</div>`;
   bindOfferAdminTabs();const form=$('#multiplierForm');
   const multiplierImageInput=form.elements.image_url;
   const multiplierPreview=$('#multiplierImagePreview');
@@ -758,7 +759,7 @@ async function multipliers(editId=null){
       try{
         const data=await api('/api/admin/catalog/products?q='+encodeURIComponent(code));
         const item=(data.products||[]).find(i=>normalizeAdminOneCCode(i.external_id)===code);
-        if(item?.image_url){multiplierImageInput.value=item.image_url;multiplierPreview.src=previewImageUrl(item.image_url);}
+        if(item?.image_url){multiplierPreview.src=previewImageUrl(item.image_url);}
       }catch{}
     },350);
   });

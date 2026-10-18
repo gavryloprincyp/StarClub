@@ -673,6 +673,7 @@ function normalizeProductBarcode(value) {
 function detectProductImageMime(buffer) {
   if (!buffer || buffer.length < 4) return null;
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer[0] === 0x42 && buffer[1] === 0x4d) return 'image/bmp';
   if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
   if (buffer.slice(0, 6).toString('ascii') === 'GIF87a' || buffer.slice(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
   if (buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
@@ -864,22 +865,30 @@ function offerManualNewPrice(offer) {
 // Default images are placeholders; use actual catalog photo synced from 1C when available.
 function isOfferPlaceholderImage(value) {
   const v = String(value || '').trim();
-  return !v || /^\/assets\/(star(?:\.svg)?|starclub-bag\.svg)$/i.test(v);
+  return !v || /^\/assets\/(?:star(?:\.svg)?|starclub-bag\.svg|coffee\.svg|coffee-bag\.svg|croissant\.svg|baguette\.svg|water\.svg)$/i.test(v);
+}
+function syncedProductPhotoUrl(product) {
+  if (!product) return null;
+  // Binary photos received through the 1C image endpoint are authoritative.
+  // Keep existing URL images as a fallback for older integrations.
+  const picture = db.prepare('SELECT 1 AS present FROM product_images WHERE product_id = ? LIMIT 1').get(product.id);
+  return picture ? productImageRoute(product.id) : (product.image_url || null);
 }
 function catalogPhotoForCode(code) {
   if (!code) return null;
-  const product = productCatalogRowByCode(normalizeOneCCode(code));
-  return product?.image_url || null;
+  return syncedProductPhotoUrl(productCatalogRowByCode(normalizeOneCCode(code)));
 }
 function catalogPhotoForOffer(offer) {
   const code = normalizeOneCCode(getOfferTargetValue(offer));
   if (!code) return null;
   if (getOfferTargetType(offer) === 'product') return catalogPhotoForCode(code);
   if (getOfferTargetType(offer) === 'group') {
-    const row = db.prepare(`SELECT image_url FROM products
-      WHERE (group_external_id = ? OR group_path_json LIKE ?) AND image_url IS NOT NULL AND image_url <> ''
-      ORDER BY id LIMIT 1`).get(code, `%"${code.replaceAll('"', '')}"%`);
-    return row?.image_url || null;
+    const row = db.prepare(`SELECT p.id, p.image_url FROM products p
+      LEFT JOIN product_images pi ON pi.product_id = p.id
+      WHERE (p.group_external_id = ? OR p.group_path_json LIKE ?)
+        AND (pi.product_id IS NOT NULL OR (p.image_url IS NOT NULL AND p.image_url <> ''))
+      ORDER BY CASE WHEN pi.product_id IS NOT NULL THEN 0 ELSE 1 END, p.id LIMIT 1`).get(code, `%"${code.replaceAll('"', '')}"%`);
+    return syncedProductPhotoUrl(row);
   }
   return null;
 }
@@ -2362,7 +2371,7 @@ app.get('/api/client/price-check', clientAuth, (req, res) => {
       external_id: product.external_id,
       name: product.name,
       category: product.category || product.group_name || '',
-      image_url: product.image_url || null,
+      image_url: syncedProductPhotoUrl(product),
       price_cents: priceCents,
       regular_price_cents: regularPriceCents,
       club_price_applied: Boolean(club),
@@ -2438,15 +2447,18 @@ app.get('/api/client/receipts/:id', clientAuth, (req, res) => {
   } });
 });
 
+function resolvedRewardImage(item) {
+  if (!isOfferPlaceholderImage(item?.image_url)) return normalizeImageUrl(item.image_url);
+  return catalogPhotoForCode(item?.product_external_id) || normalizeImageUrl(item?.image_url) || '/assets/star.svg';
+}
+
 app.get('/api/client/rewards', clientAuth, (req, res) => {
   expireReservedRewardQrs(req.client.id);
   const items = db.prepare('SELECT * FROM reward_products WHERE is_active = 1 AND COALESCE(is_program_reward, 0) = 0 ORDER BY stars_price ASC').all();
   const available = getClientAvailableStars(req.client.id);
   res.json({ ok: true, available_stars: available, items: items.map((item) => ({
     ...item,
-    image_url: !isOfferPlaceholderImage(item.image_url) && !/^\/assets\/(?:baguette|coffee|croissant|water)\.svg$/i.test(item.image_url || '')
-      ? normalizeImageUrl(item.image_url)
-      : (catalogPhotoForCode(item.product_external_id) || item.image_url || '/assets/star.svg'),
+    image_url: resolvedRewardImage(item),
     can_get: available >= item.stars_price
   })) });
 });
@@ -3807,7 +3819,7 @@ app.delete('/api/admin/stores/:id', adminAuth, (req, res) => {
 });
 
 app.get('/api/admin/catalog/rewards', adminAuth, (req, res) => {
-  res.json({ ok: true, items: db.prepare('SELECT * FROM reward_products ORDER BY id DESC').all() });
+  res.json({ ok: true, items: db.prepare('SELECT * FROM reward_products ORDER BY id DESC').all().map((item) => ({ ...item, effective_image_url: resolvedRewardImage(item) })) });
 });
 
 function resolveRewardProductFromOneC(productExternalId) {
@@ -4031,6 +4043,8 @@ app.get('/api/admin/catalog/products', adminAuth, (req, res) => {
       const storePrice = storeId ? getProductStorePrice(product.id, storeId) : null;
       return {
         ...product,
+        image_url: syncedProductPhotoUrl(product),
+        photo_synced_from_1c: Boolean(db.prepare('SELECT 1 FROM product_images WHERE product_id = ? LIMIT 1').get(product.id)),
         store_id: storeId || null,
         synced_price_cents: storePrice?.synced_price_cents ?? null,
         manual_price_cents: storePrice?.manual_price_cents ?? null,
@@ -4039,6 +4053,20 @@ app.get('/api/admin/catalog/products', adminAuth, (req, res) => {
       };
     });
   res.json({ ok: true, products, store_id: storeId || null });
+});
+
+// Read-only status for checking a particular 1C item after photo sync.
+app.get('/api/admin/catalog/product-photo-status', adminAuth, (req, res) => {
+  const code = normalizeOneCCode(req.query.code);
+  if (!code) return res.status(400).json({ ok: false, error: 'PRODUCT_CODE_REQUIRED' });
+  const product = productCatalogRowByCode(code);
+  if (!product) return res.status(404).json({ ok: false, error: 'PRODUCT_NOT_SYNCED' });
+  const photo = db.prepare('SELECT mime_type, length(image_data) AS bytes, updated_at FROM product_images WHERE product_id = ? LIMIT 1').get(product.id);
+  return res.json({ ok: true, external_id: product.external_id, product_name: product.name,
+    photo_received_from_1c: Boolean(photo), photo_bytes: photo?.bytes || 0,
+    received_at: photo?.updated_at || null,
+    image_url: syncedProductPhotoUrl(product),
+    diagnosis: photo ? 'PHOTO_AVAILABLE' : 'NO_BINARY_PHOTO_RECEIVED_FROM_1C' });
 });
 
 app.get('/api/admin/catalog/store-prices', adminAuth, (req, res) => {
@@ -4095,7 +4123,7 @@ app.get('/api/admin/catalog/offers', adminAuth, (req, res) => {
     LEFT JOIN stores s ON s.id = o.store_id ORDER BY o.id DESC`).all().map((o) => ({
     ...o,
     tiers: parseJsonArraySafe(o.tiers_json),
-    image_url: resolvedOfferImage(o),
+    effective_image_url: resolvedOfferImage(o),
     target_type: getOfferTargetType(o),
     target_value: getOfferTargetValue(o),
     price_value_uah: (o.price_mode === 'amount' || o.price_mode === 'fixed') ? Number(o.price_value || 0) / 100 : null,

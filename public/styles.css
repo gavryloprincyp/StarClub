@@ -3397,3 +3397,64 @@ body.priceCheck-route{
 .offers-design .offer-compact-card:has(.offer-tier-list) .promo-feed-card__body{min-height:165px;}
 .price-check-club-tag{font-size:12px;color:#efc769;font-weight:800;margin-top:7px;}
 .price-check-regular{font-size:11px;color:#abb0b8;margin-top:-7px;margin-bottom:9px;}
+
+
+/* 2026-10-18: synced/custom product photos share the same consistent display area.
+   The wholesale podium never follows the height of the tier list. */
+.offers-design .offer-compact-card .promo-feed-card__media {
+  height:172px !important;
+  min-height:172px !important;
+  max-height:172px !important;
+  align-self:start !important;
+  flex:0 0 auto !important;
+  position:absolute !important;
+  right:0 !important;
+  top:0 !important;
+  bottom:auto !important;
+  width:39% !important;
+  padding:0 !important;
+  overflow:visible !important;
+  background:radial-gradient(ellipse at 50% 55%,#b98d4040,transparent 72%) !important;
+}
+.offers-design .offer-compact-card .promo-feed-card__media::before {
+  top:auto !important;
+  bottom:14px !important;
+  left:8% !important;
+  right:8% !important;
+  width:auto !important;
+  height:27px !important;
+  border-radius:50% !important;
+  background:radial-gradient(ellipse at 50% 40%,#c69b4580,#59432288 65%,transparent 94%) !important;
+  border:1px solid #cfae5230 !important;
+  box-shadow:0 10px 12px #0009,inset 0 2px 3px #e3bd6930 !important;
+}
+.offers-design .offer-compact-card .promo-feed-card__media > img {
+  position:absolute !important;
+  z-index:1 !important;
+  left:7% !important;
+  right:7% !important;
+  bottom:27px !important;
+  top:auto !important;
+  width:86% !important;
+  height:132px !important;
+  max-height:132px !important;
+  min-height:0 !important;
+  padding:0 !important;
+  margin:0 !important;
+  object-fit:contain !important;
+  object-position:center bottom !important;
+  filter:drop-shadow(0 7px 6px #000a) !important;
+  flex:none !important;
+}
+.offers-wholesale .offer-compact-card { grid-template-columns:minmax(0,1fr) 39% !important; }
+.offers-wholesale .offer-compact-card .promo-feed-card__body { width:100%;padding-right:3px !important; }
+.offers-wholesale .offer-compact-card .promo-feed-card__media { border-left:0 !important; }
+.offers-wholesale .wholesale-media-caption { display:none !important; }
+@media(max-width:360px) {
+  .offers-design .offer-compact-card .promo-feed-card__media {
+    height:156px !important; min-height:156px !important; max-height:156px !important;
+  }
+  .offers-design .offer-compact-card .promo-feed-card__media>img {
+    height:120px !important; max-height:120px !important; bottom:25px !important;
+  }
+}

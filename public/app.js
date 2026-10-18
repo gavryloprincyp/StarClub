@@ -1025,7 +1025,6 @@ function offersScreen() {
           <div class="promo-feed-card__media">
             ${o.type === 'wholesale' ? `<svg class="wholesale-discount-tag" viewBox="0 0 36 42" aria-hidden="true"><path d="M19 1h12a4 4 0 0 1 4 4v13L15 40 1 26Z" fill="#efc565"/><circle cx="28" cy="8" r="2.5" fill="#45330d"/><path d="m11 25 11-10" stroke="#16140e" stroke-width="2.4" stroke-linecap="round"/><circle cx="11" cy="18" r="2" fill="none" stroke="#16140e" stroke-width="1.8"/><circle cx="22" cy="25" r="2" fill="none" stroke="#16140e" stroke-width="1.8"/></svg>` : ''}
             <img loading="lazy" decoding="async" src="${safeHtml(o.image_url || fallbackImage)}" alt="${safeHtml(o.target_name || o.name || '')}" onerror="this.onerror=null;this.src='/assets/star.svg'">
-            ${o.type === 'wholesale' ? `<p class="wholesale-media-caption">${index % 2 === 0 ? 'Вигідна ціна<br>для оптових покупок' : 'Більше покупок —<br>більше вигоди'}</p>` : ''}
           </div>
         </article>`;
       }).join('') || '<div class="card empty">Активних пропозицій для цього магазину поки немає</div>'}
