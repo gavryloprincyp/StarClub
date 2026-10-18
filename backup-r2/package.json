@@ -1,0 +1,17 @@
+{
+  "name": "starclub-r2-pg-backup",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone scheduled PostgreSQL -> Cloudflare R2 backup for Star Club",
+  "scripts": {
+    "start": "node backup.mjs",
+    "test": "node --test crypto.test.mjs",
+    "download": "node restore-download.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/lib-storage": "^3.0.0"
+  },
+  "engines": { "node": ">=20" }
+}
