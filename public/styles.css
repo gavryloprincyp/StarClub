@@ -3374,3 +3374,26 @@ body.priceCheck-route{
     grid-template-rows:112px 124px 108px auto auto;
   }
 }
+
+/* Star Club offer photo display: centered product with softly rounded platform. */
+.offers-design .offer-compact-card .promo-feed-card__media {
+  display:flex !important;align-items:center;justify-content:center;
+  padding:12px !important;overflow:hidden;border-radius:22px;
+  background:radial-gradient(ellipse at 65% 62%,#ba8a3552 0%,#45351e22 53%,transparent 79%);
+}
+.offers-design .offer-compact-card .promo-feed-card__media:before {
+  content:"";position:absolute;z-index:0;left:10%;right:10%;top:auto;bottom:9%;height:21%;
+  border-radius:50%;background:radial-gradient(ellipse,#b68b3a77,#41321877 66%,transparent);
+  box-shadow:0 8px 13px #0009,inset 0 2px 0 #e3bd6930;
+}
+.offers-design .offer-compact-card .promo-feed-card__media img {
+  display:block;position:relative;z-index:1;width:100% !important;height:100% !important;
+  max-height:175px !important;object-fit:contain !important;object-position:center !important;
+  padding:8px 5px 15px !important;filter:drop-shadow(0 8px 7px #0008);
+}
+.offers-design .offer-tier-list{line-height:1.5 !important;color:#f2d895 !important;font-size:11px !important;}
+.offers-design .offer-club-limit{font-size:10px;color:#d3b96e;line-height:1.35;margin:7px 0 0;}
+.offers-design .offer-compact-card:has(.offer-tier-list){min-height:190px !important;}
+.offers-design .offer-compact-card:has(.offer-tier-list) .promo-feed-card__body{min-height:165px;}
+.price-check-club-tag{font-size:12px;color:#efc769;font-weight:800;margin-top:7px;}
+.price-check-regular{font-size:11px;color:#abb0b8;margin-top:-7px;margin-bottom:9px;}

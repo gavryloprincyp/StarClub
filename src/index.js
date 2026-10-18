@@ -861,6 +861,56 @@ function offerManualNewPrice(offer) {
   return Math.max(0, Math.round(Number(offer.manual_new_price_cents || 0)));
 }
 
+// Default images are placeholders; use actual catalog photo synced from 1C when available.
+function isOfferPlaceholderImage(value) {
+  const v = String(value || '').trim();
+  return !v || /^\/assets\/(star(?:\.svg)?|starclub-bag\.svg)$/i.test(v);
+}
+function catalogPhotoForCode(code) {
+  if (!code) return null;
+  const product = productCatalogRowByCode(normalizeOneCCode(code));
+  return product?.image_url || null;
+}
+function catalogPhotoForOffer(offer) {
+  const code = normalizeOneCCode(getOfferTargetValue(offer));
+  if (!code) return null;
+  if (getOfferTargetType(offer) === 'product') return catalogPhotoForCode(code);
+  if (getOfferTargetType(offer) === 'group') {
+    const row = db.prepare(`SELECT image_url FROM products
+      WHERE (group_external_id = ? OR group_path_json LIKE ?) AND image_url IS NOT NULL AND image_url <> ''
+      ORDER BY id LIMIT 1`).get(code, `%"${code.replaceAll('"', '')}"%`);
+    return row?.image_url || null;
+  }
+  return null;
+}
+function resolvedOfferImage(offer, representative = null) {
+  const explicit = normalizeImageUrl(offer?.image_url);
+  if (!isOfferPlaceholderImage(offer?.image_url)) return explicit;
+  let productPhoto = catalogPhotoForOffer(offer) || representative?.image_url;
+  if (!productPhoto && offer?.legacy_promo !== false && offer?.name) {
+    const exact = db.prepare("SELECT image_url FROM products WHERE name = ? COLLATE NOCASE AND image_url IS NOT NULL AND image_url <> '' LIMIT 1").get(offer.name);
+    productPhoto = exact?.image_url || null;
+  }
+  return productPhoto || explicit || '/assets/star.svg';
+}
+function effectiveClubOfferForProduct(product, storeId, regularPriceCents) {
+  if (!product || !Number.isFinite(Number(regularPriceCents)) || Number(regularPriceCents) <= 0) return null;
+  const now = Date.now();
+  const item = { external_product_id: product.external_id, product_id: product.id, name: product.name,
+    category: product.category, group_external_id: product.group_external_id, group_path_json: product.group_path_json };
+  const candidates = getActiveOffers(storeId, now).filter((offer) =>
+    offer.type === 'club' && offerMatchesItem(offer, item)).map((offer) => {
+      const manual = offerManualNewPrice(offer);
+      const mode = offer.price_mode || (offer.club_price_cents !== null && offer.club_price_cents !== undefined ? 'fixed' : null);
+      const value = offer.price_mode ? offer.price_value : offer.club_price_cents;
+      const computed = manual !== null ? manual : mode && Number.isFinite(Number(value))
+        ? calculatePriceByMode(regularPriceCents, mode, value, offer.rounding_mode || 'kopeck') : null;
+      return { offer, cents: computed };
+    }).filter((candidate) => candidate.cents !== null && candidate.cents >= 0 && candidate.cents < regularPriceCents);
+  candidates.sort((a,b) => getOfferPriority(b.offer)-getOfferPriority(a.offer) || a.cents-b.cents);
+  return candidates[0] || null;
+}
+
 function parseWholesaleTiers(offer) {
   if (!offer?.tiers_json) return [];
   try {
@@ -985,7 +1035,12 @@ function offerShowcaseView(offer = {}, preferredStoreId = null, context = null) 
 
   return {
     ...offer,
-    image_url: normalizeImageUrl(offer.image_url || representative?.image_url),
+    image_url: resolvedOfferImage(offer, representative),
+    wholesale_tiers: offer.type === 'wholesale' ? parseWholesaleTiers(offer).map((tier) => ({
+      qty: tier.qty, mode: tier.mode, value: tier.value,
+      price_cents: regularPriceCents !== null ? calculatePriceByMode(regularPriceCents, tier.mode, tier.value, offer.rounding_mode || 'kopeck') : null
+    })) : [],
+    max_club_qty_per_receipt: offer.max_club_qty_per_receipt || null,
     current_price_cents: currentPriceCents,
     old_price_cents: regularPriceCents,
     price_from: isFromPrice,
@@ -1024,6 +1079,8 @@ function calculateDraftWithOffers({ items = [], storeId, purchasedAt }) {
   let expectedStars = 0;
   const adminExcludedCodes = getAdminStarAccrualExclusionSet();
   const adminExcludedGroups = getStarAccrualGroupExclusionSet();
+  // One club-price cap per product and offer across all lines of the same receipt.
+  const clubUnitsUsed = new Map();
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index] || {};
@@ -1091,7 +1148,14 @@ function calculateDraftWithOffers({ items = [], storeId, purchasedAt }) {
       return a.priceCents - b.priceCents;
     })[0];
     const finalUnitPriceCents = bestPrice.priceCents;
-    const finalLineTotalCents = Math.max(0, Math.round(finalUnitPriceCents * qty));
+    const clubLimit = bestPrice.offer?.type === 'club' ? Number(bestPrice.offer.max_club_qty_per_receipt || 0) : 0;
+    const productKey = normalizeOneCCode(item.external_product_id || item.product_id || item.name || `line:${index}`);
+    const limitKey = `${bestPrice.offer?.id || ''}:${productKey}`;
+    const alreadyDiscounted = clubUnitsUsed.get(limitKey) || 0;
+    const clubPricedQty = clubLimit > 0 ? Math.max(0, Math.min(qty, clubLimit - alreadyDiscounted)) : qty;
+    if (clubLimit > 0) clubUnitsUsed.set(limitKey, alreadyDiscounted + clubPricedQty);
+    const regularPricedQty = Math.max(0, qty - clubPricedQty);
+    const finalLineTotalCents = Math.max(0, Math.round(finalUnitPriceCents * clubPricedQty + regularUnitPriceCents * regularPricedQty));
 
     let multiplier = 1;
     let multiplierOffer = null;
@@ -1112,14 +1176,16 @@ function calculateDraftWithOffers({ items = [], storeId, purchasedAt }) {
     expectedStars += itemExpectedStars;
 
     const applied = [];
-    if (bestPrice.offer) {
+    if (bestPrice.offer && (bestPrice.offer.type !== 'club' || clubPricedQty > 0)) {
       applied.push({
         type: bestPrice.source,
         offer_id: bestPrice.offer.id,
         name: bestPrice.offer.name,
         regular_price_cents: regularUnitPriceCents,
         final_price_cents: finalUnitPriceCents,
-        tier_qty: bestPrice.tierQty || null
+        tier_qty: bestPrice.tierQty || null,
+        club_priced_qty: clubPricedQty,
+        regular_priced_qty: regularPricedQty
       });
       appliedConditions.push({ offer_id: bestPrice.offer.id, name: bestPrice.offer.name, type: bestPrice.source, line_no: item.line_no ?? index + 1 });
     }
@@ -1137,6 +1203,10 @@ function calculateDraftWithOffers({ items = [], storeId, purchasedAt }) {
       qty,
       regular_price_cents: regularUnitPriceCents,
       final_price_cents: finalUnitPriceCents,
+      club_priced_qty: bestPrice.offer?.type === 'club' ? clubPricedQty : null,
+      regular_priced_qty: bestPrice.offer?.type === 'club' ? regularPricedQty : null,
+      regular_unit_price_cents: regularUnitPriceCents,
+      final_average_unit_price_cents: qty > 0 ? Math.round(finalLineTotalCents / qty) : finalUnitPriceCents,
       regular_line_total_cents: regularLineTotalCents,
       final_line_total_cents: finalLineTotalCents,
       discount_cents: Math.max(0, regularLineTotalCents - finalLineTotalCents),
@@ -1523,6 +1593,31 @@ function getMostPurchasedStampItem(itemCounts) {
   };
 }
 
+// Protect against legacy or orphan stamp progress with no supporting paid receipts.
+// Never delete history. Only the displayed/current count is bounded by confirmed purchases.
+function verifiedStampUnitsFromReceipts(clientId, program, excludedReceiptId = '') {
+  const rows = db.prepare(`
+    SELECT ri.product_id, ri.external_product_id, ri.name, ri.category, ri.qty,
+      ri.price_cents, ri.line_total_cents, ri.no_star_accrual, ri.is_alcohol, ri.is_tobacco, ri.is_min_margin,
+      r.id AS receipt_id, r.total_cents,
+      (SELECT COALESCE(SUM(ABS(rr.total_cents)), 0) FROM receipts rr
+        WHERE rr.original_receipt_id = r.id AND rr.client_id = r.client_id AND rr.is_return = 1) AS returned_cents
+    FROM receipt_items ri JOIN receipts r ON r.id = ri.receipt_id
+    WHERE r.client_id = ? AND r.id <> ? AND COALESCE(r.is_return,0) = 0
+      AND COALESCE(r.stars_spent,0) = 0 AND r.total_cents > 0
+    ORDER BY r.purchased_at, ri.id
+  `).all(clientId, String(excludedReceiptId || ''));
+  let total = 0;
+  for (const item of rows) {
+    if (Number(item.returned_cents || 0) >= Number(item.total_cents || 0)) continue;
+    if (Number(item.qty || 0) <= 0 || Number(item.line_total_cents || 0) <= 0) continue;
+    if ([item.no_star_accrual,item.is_alcohol,item.is_tobacco,item.is_min_margin].some((value) => Number(value || 0) === 1)) continue;
+    if (!stampProgramMatchesItem(program, item)) continue;
+    total += Math.max(0, Math.floor(Number(item.qty || 0)));
+  }
+  return total;
+}
+
 function updateStampProgress(clientId, receiptId, items = []) {
   const programs = db.prepare('SELECT * FROM stamp_programs WHERE is_active = 1').all();
 
@@ -1550,7 +1645,8 @@ function updateStampProgress(clientId, receiptId, items = []) {
       };
     }
 
-    const current = Math.max(0, Number(existing.progress || 0));
+    const current = Math.min(Math.max(0, Number(existing.progress || 0)),
+      verifiedStampUnitsFromReceipts(clientId, program, receiptId));
     const requiredQty = Math.max(1, Number(program.required_qty || 9));
     let next = current;
     let completed = Math.max(0, Number(existing.completed_count || 0));
@@ -1699,6 +1795,11 @@ function stampProgramMatchesItem(program, item = {}) {
   }
 
   if (targetType === 'group') {
+    // Built-in baguette reward must count a purchased baguette, not any bakery item.
+    if (String(program.code || '') === 'baguette-10' && wantedText === 'bakery') {
+      const exactName = normalizeMatchValue(item.name || catalogProduct?.name || '');
+      return exactName.includes('багет') || exactName.includes('baguette');
+    }
     if (groupCodes.has(wantedCode)) return true;
 
     // Старі програми зберігали один код у полі category без типу цілі.
@@ -2247,7 +2348,9 @@ app.get('/api/client/price-check', clientAuth, (req, res) => {
   const store = storeId
     ? db.prepare('SELECT id, external_id, name FROM stores WHERE (id = ? OR external_id = ?) AND is_active = 1 LIMIT 1').get(storeId, storeId)
     : null;
-  const priceCents = priceForProductAndStore(product, store?.id || storeId || null);
+  const regularPriceCents = priceForProductAndStore(product, store?.id || storeId || null);
+  const club = effectiveClubOfferForProduct(product, store?.id || storeId || null, regularPriceCents);
+  const priceCents = club?.cents ?? regularPriceCents;
   const barcodes = db.prepare('SELECT barcode FROM product_barcodes WHERE product_id = ? ORDER BY is_primary DESC, barcode').all(product.id).map((row) => row.barcode);
 
   res.json({
@@ -2261,6 +2364,10 @@ app.get('/api/client/price-check', clientAuth, (req, res) => {
       category: product.category || product.group_name || '',
       image_url: product.image_url || null,
       price_cents: priceCents,
+      regular_price_cents: regularPriceCents,
+      club_price_applied: Boolean(club),
+      club_offer_name: club?.offer?.name || null,
+      max_club_qty_per_receipt: club?.offer?.max_club_qty_per_receipt || null,
       barcodes
     },
     store: store ? { id: store.id, external_id: store.external_id, name: store.name } : null
@@ -2335,7 +2442,13 @@ app.get('/api/client/rewards', clientAuth, (req, res) => {
   expireReservedRewardQrs(req.client.id);
   const items = db.prepare('SELECT * FROM reward_products WHERE is_active = 1 AND COALESCE(is_program_reward, 0) = 0 ORDER BY stars_price ASC').all();
   const available = getClientAvailableStars(req.client.id);
-  res.json({ ok: true, available_stars: available, items: items.map((item) => ({ ...item, can_get: available >= item.stars_price })) });
+  res.json({ ok: true, available_stars: available, items: items.map((item) => ({
+    ...item,
+    image_url: !isOfferPlaceholderImage(item.image_url) && !/^\/assets\/(?:baguette|coffee|croissant|water)\.svg$/i.test(item.image_url || '')
+      ? normalizeImageUrl(item.image_url)
+      : (catalogPhotoForCode(item.product_external_id) || item.image_url || '/assets/star.svg'),
+    can_get: available >= item.stars_price
+  })) });
 });
 
 app.post('/api/client/rewards/:id/create-qr', clientAuth, (req, res) => {
@@ -2454,7 +2567,7 @@ app.get('/api/client/offers', clientAuth, (req, res) => {
       const store = o.store_id && o.store_id !== 'all'
         ? db.prepare('SELECT name FROM stores WHERE id = ? LIMIT 1').get(String(o.store_id))
         : null;
-      return { ...o, image_url: normalizeImageUrl(o.image_url), legacy_promo: true, store_name: store?.name || 'Усі магазини' };
+      return { ...o, image_url: resolvedOfferImage(o), legacy_promo: true, store_name: store?.name || 'Усі магазини' };
     });
 
   const stores = favoriteStoreRow ? [favoriteStoreRow] : [];
@@ -2471,7 +2584,13 @@ app.get('/api/client/offers', clientAuth, (req, res) => {
 app.get('/api/client/progress', clientAuth, (req, res) => {
   const stamps = db.prepare(`SELECT p.id AS program_id, p.name, p.code, p.required_qty, p.reward_stars, COALESCE(sp.progress, 0) AS progress, COALESCE(sp.completed_count, 0) AS completed_count FROM stamp_programs p LEFT JOIN client_stamp_progress sp ON sp.program_id = p.id AND sp.client_id = ? WHERE p.is_active = 1 ORDER BY p.id`).all(req.client.id);
   const challenges = db.prepare(`SELECT ch.*, COUNT(d.day) AS progress FROM challenges ch LEFT JOIN client_challenge_days d ON d.challenge_id = ch.id AND d.client_id = ? WHERE ch.is_active = 1 GROUP BY ch.id ORDER BY ch.id`).all(req.client.id);
-  res.json({ ok: true, stamps, challenges });
+  // A ghost row must not show a purchase that is absent from receipt history.
+  const verifiedStamps = stamps.map((stamp) => {
+    const program = db.prepare('SELECT * FROM stamp_programs WHERE id = ?').get(stamp.program_id);
+    const verifiedUnits = program ? verifiedStampUnitsFromReceipts(req.client.id, program) : 0;
+    return { ...stamp, progress: Math.min(Number(stamp.progress || 0), verifiedUnits) };
+  });
+  res.json({ ok: true, stamps: verifiedStamps, challenges });
 });
 
 app.get('/api/client/news', clientAuth, (req, res) => {
@@ -3976,6 +4095,7 @@ app.get('/api/admin/catalog/offers', adminAuth, (req, res) => {
     LEFT JOIN stores s ON s.id = o.store_id ORDER BY o.id DESC`).all().map((o) => ({
     ...o,
     tiers: parseJsonArraySafe(o.tiers_json),
+    image_url: resolvedOfferImage(o),
     target_type: getOfferTargetType(o),
     target_value: getOfferTargetValue(o),
     price_value_uah: (o.price_mode === 'amount' || o.price_mode === 'fixed') ? Number(o.price_value || 0) / 100 : null,
@@ -3996,13 +4116,13 @@ function pricingOfferInsertStatement() {
   return db.prepare(`INSERT INTO offers(
       type, name, description, image_url, product_external_id, category,
       target_type, target_value, price_mode, price_value, priority, parent_offer_id, visible_in_app, rounding_mode,
-      club_price_cents, old_price_cents, calculated_old_price_cents, calculated_new_price_cents,
+      club_price_cents, max_club_qty_per_receipt, old_price_cents, calculated_old_price_cents, calculated_new_price_cents,
       manual_old_price_cents, use_manual_old_price, manual_new_price_cents, use_manual_new_price,
       stars_multiplier, tiers_json, store_id, audience, active_from, active_to, is_active, created_at, updated_at
     ) VALUES(
       @type, @name, @description, @image_url, @product_external_id, @category,
       @target_type, @target_value, @price_mode, @price_value, @priority, @parent_offer_id, @visible_in_app, @rounding_mode,
-      @club_price_cents, @old_price_cents, @calculated_old_price_cents, @calculated_new_price_cents,
+      @club_price_cents, @max_club_qty_per_receipt, @old_price_cents, @calculated_old_price_cents, @calculated_new_price_cents,
       @manual_old_price_cents, @use_manual_old_price, @manual_new_price_cents, @use_manual_new_price,
       @stars_multiplier, @tiers_json, @store_id, @audience, @active_from, @active_to, @is_active, @created_at, @updated_at
     )`);
@@ -4031,6 +4151,7 @@ function makePricingOfferRow(body, targetType, targetValue, createdAt, nameOverr
     visible_in_app: body.visible_in_app === undefined ? (existing?.visible_in_app ?? 1) : (body.visible_in_app ? 1 : 0),
     rounding_mode: body.rounding_mode || existing?.rounding_mode || 'kopeck',
     club_price_cents: price.club_price_cents,
+    max_club_qty_per_receipt: (body.max_club_qty_per_receipt === undefined ? (existing?.max_club_qty_per_receipt ?? null) : (Number(body.max_club_qty_per_receipt) > 0 ? Math.floor(Number(body.max_club_qty_per_receipt)) : null)),
     old_price_cents: snapshot.old_price_cents,
     calculated_old_price_cents: snapshot.calculated_old_price_cents,
     calculated_new_price_cents: snapshot.calculated_new_price_cents,
@@ -4380,6 +4501,7 @@ app.patch('/api/admin/catalog/offers/:id', adminAuth, (req, res) => {
       product_external_id=@product_external_id, category=@category, target_type=@target_type, target_value=@target_value,
       price_mode=@price_mode, price_value=@price_value, priority=@priority, parent_offer_id=@parent_offer_id,
       visible_in_app=@visible_in_app, rounding_mode=@rounding_mode, club_price_cents=@club_price_cents,
+      max_club_qty_per_receipt=@max_club_qty_per_receipt,
       old_price_cents=@old_price_cents, calculated_old_price_cents=@calculated_old_price_cents,
       calculated_new_price_cents=@calculated_new_price_cents, manual_old_price_cents=@manual_old_price_cents,
       use_manual_old_price=@use_manual_old_price, manual_new_price_cents=@manual_new_price_cents,

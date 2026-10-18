@@ -883,6 +883,9 @@ async function cardScreen() {
 }
 
 function rewardReferenceImage(reward) {
+  // Real 1C pictures and admin uploads take precedence over old decorative presets.
+  const custom = String(reward.image_url || '');
+  if(custom && !/^\/assets\/(?:star|baguette|coffee|croissant|water)\.svg$/i.test(custom)) return custom;
   const name = String(reward.name || '').toLowerCase();
   const preset = String(reward.image_url || '');
   let image = '';
@@ -1003,6 +1006,9 @@ function offersScreen() {
           : Number(o.saving_cents);
         const kindLabel = o.type === 'wholesale' ? 'Оптова' : 'Клубна';
         const showRule = o.type === 'wholesale' && o.discount_label;
+        const wholesaleRules = o.type === 'wholesale' && Array.isArray(o.wholesale_tiers) && o.wholesale_tiers.length
+          ? o.wholesale_tiers.map(t => `від ${safeHtml(t.qty)} шт — ${t.price_cents != null ? formatOfferMoney(t.price_cents) : safeHtml(t.mode==='percent' ? `−${t.value}%` : 'за умовами пропозиції')}`).join('<br>')
+          : '';
         const multiplier = Number(o.stars_multiplier || 0);
         const scope = String(o.store_id || 'all') === 'all' ? 'Усі магазини' : (o.store_name || o.store_id);
         const fallbackImage = /вода|water|молоко/i.test(o.target_name || o.name || '') ? '/assets/water.svg' : /кава|раф|coffee/i.test(o.target_name || o.name || '') ? '/assets/coffee.svg' : /хліб|випіч|круасан/i.test(o.target_name || o.name || '') ? '/assets/croissant.svg' : '/assets/starclub-bag.svg';
@@ -1013,7 +1019,8 @@ function offersScreen() {
             <h3>${safeHtml(o.target_name || o.name)}</h3>
             <p class="promo-feed-description">${safeHtml(o.description || '')}</p>
             <div class="offer-compact-prices">${newPrice !== null ? `<strong>${o.price_from ? 'від ' : ''}${formatOfferMoney(newPrice)}</strong>` : `<strong>${safeHtml(o.discount_label || 'Star Club')}</strong>`}${oldPrice !== null ? `<s>${o.price_from ? 'від ' : ''}${formatOfferMoney(oldPrice)}</s>` : ''}${saving !== null && saving > 0 ? `<span>−${formatOfferMoney(saving)}</span>` : ''}</div>
-            ${showRule ? `<p class="offer-compact-rule">${safeHtml(o.discount_label)}</p>` : ''}
+            ${wholesaleRules ? `<p class="offer-compact-rule offer-tier-list">${wholesaleRules}</p>` : (showRule ? `<p class="offer-compact-rule">${safeHtml(o.discount_label)}</p>` : '')}
+            ${o.type==='club' && Number(o.max_club_qty_per_receipt)>0 ? `<p class="offer-club-limit">До ${safeHtml(o.max_club_qty_per_receipt)} шт за клубною ціною в одному чеку</p>`:''}
           </div>
           <div class="promo-feed-card__media">
             ${o.type === 'wholesale' ? `<svg class="wholesale-discount-tag" viewBox="0 0 36 42" aria-hidden="true"><path d="M19 1h12a4 4 0 0 1 4 4v13L15 40 1 26Z" fill="#efc565"/><circle cx="28" cy="8" r="2.5" fill="#45330d"/><path d="m11 25 11-10" stroke="#16140e" stroke-width="2.4" stroke-linecap="round"/><circle cx="11" cy="18" r="2" fill="none" stroke="#16140e" stroke-width="1.8"/><circle cx="22" cy="25" r="2" fill="none" stroke="#16140e" stroke-width="1.8"/></svg>` : ''}
@@ -1303,7 +1310,9 @@ function renderPriceCheckResult(data, barcode, debug = null) {
         <div class="price-check-found">${scannerSvg('check')}<span>Товар знайдено</span></div>
         <h2>${safeHtml(product.name)}</h2>
         ${product.category ? `<p class="price-check-category">${safeHtml(product.category)}</p>` : ''}
+        ${product.club_price_applied ? `<div class="price-check-club-tag">★ Клубна ціна${product.max_club_qty_per_receipt ? ` · до ${safeHtml(product.max_club_qty_per_receipt)} шт у чеку` : ''}</div>` : ''}
         <div class="price-check-price ${product.price_cents == null || Number(product.price_cents) <= 0 ? 'price-unavailable' : ''}">${formatProductPrice(product.price_cents)}</div>
+        ${product.club_price_applied && product.regular_price_cents ? `<div class="price-check-regular"><s>${formatProductPrice(product.regular_price_cents)}</s> · Звичайна ціна 1С</div>` : ''}
         <div class="price-check-store">${appIcon('store')}<span>Ціна у магазині <b>${safeHtml(storeName)}</b></span></div>
       </div>
       <div class="price-check-actions">

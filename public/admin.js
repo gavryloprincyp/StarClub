@@ -289,7 +289,9 @@ function rewardForm(r={},stores=[]){
     <label class="admin-field"><span>Код товару з 1С</span><input name="product_external_id" placeholder="Наприклад, ЦБ000008264" value="${esc(r.product_external_id||'')}" autocomplete="off"></label>
     <label class="admin-field"><span>Назва товару</span><input name="name" placeholder="Підтягнеться автоматично з 1С" value="${esc(r.name||'')}" required><small id="rewardProductLookupStatus" class="small"></small></label>
     <input name="stars_price" type="number" placeholder="Ціна у зірках" value="${esc(r.stars_price||'')}" required>
-    <input name="image_url" placeholder="Фото URL" value="${esc(r.image_url||'/assets/star.svg')}">
+    <label class="admin-field"><span>Фото з 1С або власне зображення</span><input name="image_url" placeholder="Підтягнеться з 1С або введіть URL" value="${esc(r.image_url||'')}"></label>
+    <label class="admin-field"><span>Завантажити фото з комп’ютера</span><input id="rewardImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label>
+    <div class="promo-image-preview"><img id="rewardImagePreview" src="${esc(previewImageUrl(r.image_url||'/assets/star.svg'))}" alt="Фото товару"><div><b>Фото товару</b><p class="small">Якщо власного фото немає, використовується фото з номенклатури 1С.</p></div></div>
     <label class="admin-field"><span>Магазин з 1С</span><select name="store_id">${pricingStoreOptions(stores,r.store_id||'all',true)}</select></label>
     <input name="per_client_limit" type="number" placeholder="Ліміт на клієнта" value="${esc(r.per_client_limit||1)}">
     <label class="checkline"><input type="checkbox" name="is_active" ${r.id ? (Number(r.is_active)?'checked':'') : 'checked'}> Активний</label>
@@ -305,6 +307,12 @@ async function rewards(editId=null){
   const edit=editId?items.find(x=>String(x.id)===String(editId)):null;
   content.innerHTML=`<div class="card"><h3>${edit?'Редагувати товар':'Додати товар за зірки'}</h3>${rewardForm(edit||{},oneCStores)}</div><div class="card"><table><thead><tr><th>Назва</th><th>Зірки</th><th>1С товар</th><th>Магазин</th><th>Статус</th><th>Дії</th></tr></thead><tbody>${items.map(r=>`<tr><td>${esc(r.name)}</td><td>${num(r.stars_price)} ★</td><td>${esc(r.product_external_id||'—')}</td><td>${esc(r.store_id||'all')}</td><td>${activeText(r.is_active)}</td><td class="actions">${btn('Редагувати',`data-edit-reward="${r.id}"`)}${btn('Видалити',`data-delete-reward="${r.id}"`)}</td></tr>`).join('')}</tbody></table></div>`;
   const form=$('#rewardForm');
+  $('#rewardImageFile')?.addEventListener('change', async (ev) => {
+    try { const dataUrl=await fileToDataUrl(ev.target.files?.[0]);
+      if(dataUrl) {form.elements.image_url.value=dataUrl;$('#rewardImagePreview').src=dataUrl;}
+    } catch(err) { alert(err.message);ev.target.value=''; }
+  });
+  form.elements.image_url?.addEventListener('input',()=>{$('#rewardImagePreview').src=previewImageUrl(form.elements.image_url.value);});
   const codeInput=form.elements.product_external_id;
   const nameInput=form.elements.name;
   const storeInput=form.elements.store_id;
@@ -331,6 +339,11 @@ async function rewards(editId=null){
         return null;
       }
       nameInput.value=String(exact.name||'').trim();
+      const imageInput=form.elements.image_url;
+      if(exact.image_url && (!imageInput.value || imageInput.value==='/assets/star.svg')) {
+        imageInput.value=exact.image_url;
+        const preview=$('#rewardImagePreview'); if(preview)preview.src=previewImageUrl(exact.image_url);
+      }
       lastResolvedCode=code;
       if(lookupStatus) lookupStatus.textContent=`Знайдено в 1С: ${exact.name||code}`;
       return exact;
@@ -438,15 +451,33 @@ function previewImageUrl(value){
   }catch{return '/assets/star.svg';}
 }
 
-function fileToDataUrl(file){
-  return new Promise((resolve,reject)=>{
-    if(!file)return resolve('');
-    if(file.size>1_200_000)return reject(new Error('Фото має бути не більше 1,2 МБ'));
-    const reader=new FileReader();
-    reader.onload=()=>resolve(String(reader.result||''));
+async function fileToDataUrl(file){
+  if(!file)return '';
+  if(!/^image\/(png|jpeg|webp|gif)$/i.test(file.type))throw new Error('Виберіть PNG, JPG, WEBP або GIF');
+  if(file.size>15*1024*1024)throw new Error('Фото має бути не більше 15 МБ');
+  const readOriginal=()=>new Promise((resolve,reject)=>{
+    const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||''));
     reader.onerror=()=>reject(new Error('Не вдалося прочитати фото'));
     reader.readAsDataURL(file);
   });
+  if(file.size<1_050_000)return readOriginal();
+  // Convert large local photos to a compact persistent image, not an object URL.
+  const bitmap=await createImageBitmap(file).catch(()=>null);
+  if(!bitmap)throw new Error('Не вдалося прочитати зображення');
+  const scale=Math.min(1,1400/Math.max(bitmap.width,bitmap.height));
+  const canvas=document.createElement('canvas');
+  canvas.width=Math.max(1,Math.round(bitmap.width*scale));
+  canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+  const ctx=canvas.getContext('2d');
+  if(!ctx)throw new Error('Обробка фото недоступна у браузері');
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);
+  bitmap.close?.();
+  for(const quality of [0.87,0.74,0.6,0.45]){
+    const encoded=canvas.toDataURL('image/jpeg',quality);
+    if(encoded.length<1_400_000)return encoded;
+  }
+  throw new Error('Не вдалося стиснути фото. Виберіть менше зображення');
 }
 function roundPreviewCents(value,mode='kopeck'){
   const cents=Math.max(0,Number(value||0));
@@ -597,6 +628,7 @@ function pricingRuleForm(o={},stores=[]){
       <div class="pricing-mode-heading"><b>Налаштування клубної ціни</b><span>Оберіть один спосіб розрахунку клубної вартості.</span></div>
       <label class="admin-field"><span>Спосіб ціни</span><select name="price_mode" id="clubPriceMode"><option value="percent" ${priceMode==='percent'?'selected':''}>Знижка у %</option><option value="amount" ${priceMode==='amount'?'selected':''}>Знижка у грн</option><option value="fixed" ${priceMode==='fixed'?'selected':''}>Фіксована нова ціна</option></select></label>
       <label class="admin-field"><span>Значення</span><input id="clubPriceValue" name="price_value" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(offerStoredPriceValue(o))}"></label>
+      <label class="admin-field"><span>Максимум одиниць у чеку за клубною ціною (0 — без обмеження)</span><input name="max_club_qty_per_receipt" type="number" min="0" step="1" value="${esc(o.max_club_qty_per_receipt||0)}" placeholder="Наприклад, 5"></label>
       <label class="admin-field"><span>Округлення</span><select name="rounding_mode" id="pricingRounding"><option value="kopeck" ${o.rounding_mode==='kopeck'||!o.rounding_mode?'selected':''}>До копійки</option><option value="10kop" ${o.rounding_mode==='10kop'?'selected':''}>До 10 коп.</option><option value="50kop" ${o.rounding_mode==='50kop'?'selected':''}>До 50 коп.</option><option value="1uah" ${o.rounding_mode==='1uah'?'selected':''}>До 1 грн</option></select></label>
     </div>
     <div class="offer-type-fields wholesale-builder" data-pricing-field="wholesale">
@@ -636,6 +668,14 @@ async function pricingRules(editId=null){
   const form=$('#pricingRuleForm'),typeSelect=$('#pricingRuleType'),targetTypeSelect=$('#pricingTargetType'),storeSelect=$('#pricingStoreId'),targetPicker=$('#pricingTargetPicker'),targetSearch=$('#pricingTargetSearch');
   const selectedTargets=new Set(edit?[normalizeAdminOneCCode(edit.target_value)]:[]);let targetItems=[];
   const selectedItem=()=>targetItems.find(i=>selectedTargets.has(normalizeAdminOneCCode(i.external_id||i.id)));
+  const suggestOneCPhoto=()=>{
+    const item=selectedItem();const imageInput=$('#pricingImageUrl');
+    if(!item?.image_url||!imageInput)return;
+    if(!imageInput.value||imageInput.value==='/assets/star.svg') {
+      imageInput.value=item.image_url;
+      $('#pricingImagePreview').src=previewImageUrl(item.image_url);
+    }
+  };
   const calculatePreview=()=>{const item=selectedItem();let oldCents=item?Number(item.price_cents??item.min_price_cents??0):Number(edit?.calculated_old_price_cents||0);if($('#useManualOld')?.checked)oldCents=uahToCents($('#manualOldPrice')?.value);let newCents=null;if($('#useManualNew')?.checked)newCents=uahToCents($('#manualNewPrice')?.value);else if(typeSelect.value==='club'&&oldCents>0){const mode=$('#clubPriceMode').value,value=Number($('#clubPriceValue').value||0);newCents=mode==='percent'?Math.round(oldCents*(100-value)/100):mode==='amount'?Math.max(0,oldCents-uahToCents(value)):uahToCents(value);}else if(typeSelect.value==='wholesale'&&oldCents>0){const first=$$('[data-tier-row]')[0];if(first){const mode=first.querySelector('[data-tier-mode]').value,value=Number(first.querySelector('[data-tier-value]').value||0);newCents=mode==='percent'?Math.round(oldCents*(100-value)/100):mode==='amount'?Math.max(0,oldCents-uahToCents(value)):uahToCents(value);}}$('#pricingOldPrice').textContent=oldCents>0?`${num(oldCents/100)} грн`:'—';$('#pricingNewPrice').textContent=newCents!==null?`${num(newCents/100)} грн`:'—';$('#pricingSaving').textContent=oldCents>0&&newCents!==null?`${num(Math.max(0,oldCents-newCents)/100)} грн`:'—';$('#pricingPreviewHint').textContent=item?`${item.name} · ${storeSelect.options[storeSelect.selectedIndex]?.text||''}`:'Оберіть товар або групу.';};
   const renderPicker=()=>{
     const search=targetSearch.value.trim().toLowerCase();
@@ -656,9 +696,10 @@ async function pricingRules(editId=null){
       renderPicker();
       calculatePreview();
     });
+    suggestOneCPhoto();
     $('#selectedTargetsCount').textContent=fixed?`${selectedTargets.size} з 1`:`${selectedTargets.size} вибрано`;
   };
-  const loadTargets=async()=>{const storeId=storeSelect.value;if(!storeId){targetItems=[];renderPicker();return;}const type=targetTypeSelect.value;const data=await api(`/api/admin/catalog/${type==='group'?'product-groups':'products'}?store_id=${encodeURIComponent(storeId)}`);targetItems=type==='group'?(data.groups||[]):(data.products||[]);renderPicker();calculatePreview();};
+  const loadTargets=async()=>{const storeId=storeSelect.value;if(!storeId){targetItems=[];renderPicker();return;}const type=targetTypeSelect.value;const data=await api(`/api/admin/catalog/${type==='group'?'product-groups':'products'}?store_id=${encodeURIComponent(storeId)}`);targetItems=type==='group'?(data.groups||[]):(data.products||[]);renderPicker();suggestOneCPhoto();calculatePreview();};
   const syncFields=async()=>{
     const wholesale=typeSelect.value==='wholesale';
     const fixed=!wholesale&&$('#clubPriceMode').value==='fixed';
@@ -678,7 +719,7 @@ async function pricingRules(editId=null){
   };
   const bindTierButtons=()=>{$$('[data-remove-tier]').forEach(btn=>btn.onclick=()=>{const row=btn.closest('[data-tier-row]');if($$('[data-tier-row]').length>1)row.remove();else{row.querySelector('[data-tier-qty]').value='';row.querySelector('[data-tier-value]').value='';}calculatePreview();});$$('[data-tier-row] input,[data-tier-row] select').forEach(el=>el.addEventListener('input',calculatePreview));};
   $('#addWholesaleTier')?.addEventListener('click',()=>{$('#wholesaleTiers').insertAdjacentHTML('beforeend',wholesaleTierRows([{qty:'',mode:'fixed',value:''}]));bindTierButtons();});typeSelect.addEventListener('change',syncFields);targetTypeSelect.addEventListener('change',()=>{selectedTargets.clear();loadTargets();});storeSelect.addEventListener('change',()=>{selectedTargets.clear();loadTargets();});targetSearch.addEventListener('input',renderPicker);$('#clubPriceMode').addEventListener('change',syncFields);$('#clubPriceValue').addEventListener('input',calculatePreview);['#useManualOld','#manualOldPrice','#useManualNew','#manualNewPrice'].forEach(sel=>$(sel)?.addEventListener('input',calculatePreview));const imageInput=$('#pricingImageUrl'),imageFile=$('#pricingImageFile');imageInput?.addEventListener('input',()=>{$('#pricingImagePreview').src=previewImageUrl(imageInput.value);});imageFile?.addEventListener('change',async()=>{const dataUrl=await fileToDataUrl(imageFile.files?.[0]);if(dataUrl){imageInput.value=dataUrl;$('#pricingImagePreview').src=dataUrl;}});bindTierButtons();await syncFields();
-  form.onsubmit=async ev=>{ev.preventDefault();const type=typeSelect.value,targetType=targetTypeSelect.value,targets=[...selectedTargets];if(!storeSelect.value){alert('Оберіть магазин або «Усі магазини»');return;}if(!targets.length){alert('Оберіть товар або групу');return;}if(type==='club'&&$('#clubPriceMode').value==='fixed'&&(targetType!=='product'||targets.length!==1)){alert('Фіксовану ціну можна задати лише для одного товару');return;}const tiers=type==='wholesale'?$$('[data-tier-row]').map(row=>({qty:Number(row.querySelector('[data-tier-qty]').value),mode:row.querySelector('[data-tier-mode]').value,value:Number(row.querySelector('[data-tier-value]').value)})).filter(t=>t.qty>0&&Number.isFinite(t.value)):[];if(type==='wholesale'&&!tiers.length){alert('Додайте оптовий рівень');return;}const body={type,name:val(form,'name'),description:val(form,'description')||null,image_url:val(form,'image_url')||'/assets/star.svg',store_id:storeSelect.value,target_type:targetType,price_mode:type==='club'?$('#clubPriceMode').value:null,price_value:type==='club'?Number($('#clubPriceValue').value):null,rounding_mode:val(form,'rounding_mode')||'kopeck',tiers,visible_in_app:check(form,'visible_in_app'),is_active:check(form,'is_active'),use_manual_old_price:check(form,'use_manual_old_price'),manual_old_price_cents:uahToCents(val(form,'manual_old_price_uah')),use_manual_new_price:check(form,'use_manual_new_price'),manual_new_price_cents:uahToCents(val(form,'manual_new_price_uah'))};if(edit)await api(`/api/admin/catalog/offers/${edit.id}`,{method:'PATCH',body:JSON.stringify({...body,target_value:targets[0]})});else if(targets.length>1)await api('/api/admin/catalog/pricing/bulk',{method:'POST',body:JSON.stringify({...body,target_values:targets})});else await api('/api/admin/catalog/offers',{method:'POST',body:JSON.stringify({...body,target_value:targets[0]})});await pricingRules();};
+  form.onsubmit=async ev=>{ev.preventDefault();const type=typeSelect.value,targetType=targetTypeSelect.value,targets=[...selectedTargets];if(!storeSelect.value){alert('Оберіть магазин або «Усі магазини»');return;}if(!targets.length){alert('Оберіть товар або групу');return;}if(type==='club'&&$('#clubPriceMode').value==='fixed'&&(targetType!=='product'||targets.length!==1)){alert('Фіксовану ціну можна задати лише для одного товару');return;}const tiers=type==='wholesale'?$$('[data-tier-row]').map(row=>({qty:Number(row.querySelector('[data-tier-qty]').value),mode:row.querySelector('[data-tier-mode]').value,value:Number(row.querySelector('[data-tier-value]').value)})).filter(t=>t.qty>0&&Number.isFinite(t.value)):[];if(type==='wholesale'&&!tiers.length){alert('Додайте оптовий рівень');return;}const body={type,name:val(form,'name'),description:val(form,'description')||null,image_url:val(form,'image_url')||'/assets/star.svg',store_id:storeSelect.value,target_type:targetType,price_mode:type==='club'?$('#clubPriceMode').value:null,price_value:type==='club'?Number($('#clubPriceValue').value):null,rounding_mode:val(form,'rounding_mode')||'kopeck',max_club_qty_per_receipt:Number(val(form,'max_club_qty_per_receipt')||0),tiers,visible_in_app:check(form,'visible_in_app'),is_active:check(form,'is_active'),use_manual_old_price:check(form,'use_manual_old_price'),manual_old_price_cents:uahToCents(val(form,'manual_old_price_uah')),use_manual_new_price:check(form,'use_manual_new_price'),manual_new_price_cents:uahToCents(val(form,'manual_new_price_uah'))};if(edit)await api(`/api/admin/catalog/offers/${edit.id}`,{method:'PATCH',body:JSON.stringify({...body,target_value:targets[0]})});else if(targets.length>1)await api('/api/admin/catalog/pricing/bulk',{method:'POST',body:JSON.stringify({...body,target_values:targets})});else await api('/api/admin/catalog/offers',{method:'POST',body:JSON.stringify({...body,target_value:targets[0]})});await pricingRules();};
   $('#cancelPricingEdit')?.addEventListener('click',()=>pricingRules());$$('[data-edit-pricing]').forEach(b=>b.onclick=async()=>{await pricingRules(b.dataset.editPricing);scrollAdminFormIntoView();});$$('[data-delete-pricing]').forEach(b=>b.onclick=async()=>{if(confirm('Видалити цінове правило і картку?')){await api(`/api/admin/catalog/offers/${b.dataset.deletePricing}`,{method:'DELETE'});await pricingRules();}});
 }
 
@@ -686,7 +727,9 @@ function multiplierForm(o={},stores=[]){
   return `<form id="multiplierForm" class="form-grid offer-editor">
     <label class="admin-field"><span>Назва для клієнта</span><input name="name" value="${esc(o.name||'')}" placeholder="Наприклад: Подвійні зірки на випічку" required></label>
     <label class="admin-field"><span>Опис</span><input name="description" value="${esc(o.description||'')}"></label>
-    <label class="admin-field"><span>Фото</span><input name="image_url" value="${esc(o.image_url||'/assets/star.svg')}" placeholder="Фото URL"></label>
+    <label class="admin-field"><span>Фото (автоматично з 1С для вибраного товару)</span><input name="image_url" value="${esc(o.image_url||'/assets/star.svg')}" placeholder="Фото URL"></label>
+    <label class="admin-field"><span>Завантажити власне фото</span><input id="multiplierImageFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label>
+    <div class="promo-image-preview"><img id="multiplierImagePreview" src="${esc(previewImageUrl(o.image_url||'/assets/star.svg'))}" alt="Попередній перегляд"><div><b>Зображення множника</b><p class="small">Якщо поле фото не заповнене, Star Club використовує фото товару з 1С.</p></div></div>
     <label class="admin-field"><span>Код товару або групи з 1С</span><input name="target_ref" value="${esc(o.target_value||o.product_external_id||o.category||'')}" placeholder="ЦБ000004323" required></label>
     <label class="admin-field"><span>Множник зірок</span><input name="stars_multiplier" type="number" min="1" step="0.1" inputmode="decimal" value="${esc(o.stars_multiplier||'')}" placeholder="2" required></label>
     <label class="admin-field"><span>Магазин</span><select name="store_id"><option value="all" ${!o.store_id||o.store_id==='all'?'selected':''}>Усі магазини</option>${pricingStoreOptions(stores,o.store_id||'')}</select></label>
@@ -697,8 +740,29 @@ function multiplierForm(o={},stores=[]){
 async function multipliers(editId=null){
   offerAdminSection='multiplier';title.textContent='Пропозиції та ціни';
   const [{offers:all=[]},{stores=[]}]=await Promise.all([api('/api/admin/catalog/offers'),api('/api/admin/stores')]);const items=all.filter(o=>o.type==='stars_multiplier');const edit=editId?items.find(x=>String(x.id)===String(editId)):null;
-  content.innerHTML=`${offerAdminTabs()}<div class="card editor-card ${edit?'edit-panel':''}"><div class="section-title-row"><div><h3>${edit?'Редагувати множник':'Множник зірок'}</h3><p class="small">Логіку множника залишено окремою та без змін від початкової реалізації.</p></div><span class="pill">★</span></div>${multiplierForm(edit||{},stores)}</div><div class="offer-list">${items.map(o=>`<article class="offer-mobile-card"><div class="offer-card-head"><div><span class="pill">Множник</span><h3>${esc(o.name)}</h3></div><span>${activeText(o.is_active)}</span></div><dl><div><dt>Умова</dt><dd>${esc(offerCondition(o))}</dd></div><div><dt>Код 1С</dt><dd><code>${esc(o.target_value||o.product_external_id||o.category||'—')}</code></dd></div><div><dt>Магазин</dt><dd>${esc(o.store_name||o.store_id||'all')}</dd></div></dl><div class="actions">${btn('Редагувати',`data-edit-multiplier="${o.id}"`)}${btn('Видалити',`data-delete-multiplier="${o.id}" class="danger"`)}</div></article>`).join('')||'<div class="card">Множників поки немає</div>'}</div>`;
-  bindOfferAdminTabs();const form=$('#multiplierForm');form.onsubmit=async ev=>{ev.preventDefault();const multiplier=Number(val(form,'stars_multiplier'));if(multiplier<=1){alert('Вкажіть множник більше 1, наприклад 2');return;}const body={type:'stars_multiplier',name:val(form,'name'),description:val(form,'description'),image_url:val(form,'image_url')||'/assets/star.svg',target_ref:normalizeAdminOneCCode(val(form,'target_ref')),stars_multiplier:multiplier,store_id:val(form,'store_id')||'all',is_active:check(form,'is_active')};await api(edit?`/api/admin/catalog/offers/${edit.id}`:'/api/admin/catalog/offers',{method:edit?'PATCH':'POST',body:JSON.stringify(body)});await multipliers();};$('#cancelMultiplierEdit')?.addEventListener('click',()=>multipliers());$$('[data-edit-multiplier]').forEach(b=>b.onclick=async()=>{await multipliers(b.dataset.editMultiplier);scrollAdminFormIntoView();});$$('[data-delete-multiplier]').forEach(b=>b.onclick=async()=>{if(confirm('Видалити множник?')){await api(`/api/admin/catalog/offers/${b.dataset.deleteMultiplier}`,{method:'DELETE'});await multipliers();}});
+  content.innerHTML=`${offerAdminTabs()}<div class="card editor-card ${edit?'edit-panel':''}"><div class="section-title-row"><div><h3>${edit?'Редагувати множник':'Множник зірок'}</h3><p class="small">Логіку множника залишено окремою та без змін від початкової реалізації.</p></div><span class="pill">★</span></div>${multiplierForm(edit||{},stores)}</div><div class="offer-list">${items.map(o=>`<article class="offer-mobile-card">${o.image_url?`<img class="pricing-list-image" src="${esc(previewImageUrl(o.image_url))}" alt="${esc(o.name)}">`:''}<div class="offer-card-head"><div><span class="pill">Множник</span><h3>${esc(o.name)}</h3></div><span>${activeText(o.is_active)}</span></div><dl><div><dt>Умова</dt><dd>${esc(offerCondition(o))}</dd></div><div><dt>Код 1С</dt><dd><code>${esc(o.target_value||o.product_external_id||o.category||'—')}</code></dd></div><div><dt>Магазин</dt><dd>${esc(o.store_name||o.store_id||'all')}</dd></div></dl><div class="actions">${btn('Редагувати',`data-edit-multiplier="${o.id}"`)}${btn('Видалити',`data-delete-multiplier="${o.id}" class="danger"`)}</div></article>`).join('')||'<div class="card">Множників поки немає</div>'}</div>`;
+  bindOfferAdminTabs();const form=$('#multiplierForm');
+  const multiplierImageInput=form.elements.image_url;
+  const multiplierPreview=$('#multiplierImagePreview');
+  multiplierImageInput.addEventListener('input',()=>{multiplierPreview.src=previewImageUrl(multiplierImageInput.value);});
+  $('#multiplierImageFile')?.addEventListener('change',async(event)=>{
+    try{const dataUrl=await fileToDataUrl(event.target.files?.[0]);if(dataUrl){multiplierImageInput.value=dataUrl;multiplierPreview.src=dataUrl;}}
+    catch(error){alert(error.message);event.target.value='';}
+  });
+  let photoSearchTimer=null;
+  form.elements.target_ref?.addEventListener('input',()=>{
+    clearTimeout(photoSearchTimer);
+    photoSearchTimer=setTimeout(async()=>{
+      const code=normalizeAdminOneCCode(val(form,'target_ref'));
+      if(!code||multiplierImageInput.value && multiplierImageInput.value!='/assets/star.svg')return;
+      try{
+        const data=await api('/api/admin/catalog/products?q='+encodeURIComponent(code));
+        const item=(data.products||[]).find(i=>normalizeAdminOneCCode(i.external_id)===code);
+        if(item?.image_url){multiplierImageInput.value=item.image_url;multiplierPreview.src=previewImageUrl(item.image_url);}
+      }catch{}
+    },350);
+  });
+  form.onsubmit=async ev=>{ev.preventDefault();const multiplier=Number(val(form,'stars_multiplier'));if(multiplier<=1){alert('Вкажіть множник більше 1, наприклад 2');return;}const body={type:'stars_multiplier',name:val(form,'name'),description:val(form,'description'),image_url:val(form,'image_url')||'/assets/star.svg',target_ref:normalizeAdminOneCCode(val(form,'target_ref')),stars_multiplier:multiplier,store_id:val(form,'store_id')||'all',is_active:check(form,'is_active')};await api(edit?`/api/admin/catalog/offers/${edit.id}`:'/api/admin/catalog/offers',{method:edit?'PATCH':'POST',body:JSON.stringify(body)});await multipliers();};$('#cancelMultiplierEdit')?.addEventListener('click',()=>multipliers());$$('[data-edit-multiplier]').forEach(b=>b.onclick=async()=>{await multipliers(b.dataset.editMultiplier);scrollAdminFormIntoView();});$$('[data-delete-multiplier]').forEach(b=>b.onclick=async()=>{if(confirm('Видалити множник?')){await api(`/api/admin/catalog/offers/${b.dataset.deleteMultiplier}`,{method:'DELETE'});await multipliers();}});
 }
 
 async function offers(editId=null,section=null){

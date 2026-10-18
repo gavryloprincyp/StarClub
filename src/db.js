@@ -623,6 +623,7 @@ export function migrate() {
       visible_in_app INTEGER DEFAULT 1,
       rounding_mode TEXT DEFAULT 'kopeck',
       club_price_cents INTEGER,
+      max_club_qty_per_receipt INTEGER,
       old_price_cents INTEGER,
       calculated_old_price_cents INTEGER,
       calculated_new_price_cents INTEGER,
@@ -950,6 +951,9 @@ export function migrate() {
   `);
   innerDb.run('UPDATE offers SET visible_in_app = 1 WHERE visible_in_app IS NULL');
   innerDb.run("UPDATE offers SET rounding_mode = 'kopeck' WHERE rounding_mode IS NULL OR rounding_mode = ''");
+  const offerLimitInfo = innerDb.exec('PRAGMA table_info(offers)');
+  const offerLimitColumns = new Set((offerLimitInfo?.[0]?.values || []).map((row) => row[1]));
+  if (!offerLimitColumns.has('max_club_qty_per_receipt')) innerDb.run('ALTER TABLE offers ADD COLUMN max_club_qty_per_receipt INTEGER');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_products_group_external_id ON products(group_external_id)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_receipts_client_date ON receipts(client_id, purchased_at DESC)');
   innerDb.run('CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt ON receipt_items(receipt_id)');
