@@ -915,7 +915,7 @@ function rewardsScreen() {
       <div class="rewards-product-list">
         ${items.map((r) => `
           <article class="rewards-product ${matches(r) ? '' : 'hidden'}" data-reward-search-text="${safeHtml(`${r.name || ''} ${r.conditions || ''}`.toLocaleLowerCase('uk'))}">
-            <img class="rewards-product-image" src="${safeHtml(rewardReferenceImage(r))}" alt="${safeHtml(r.name)}" onerror="this.onerror=null;this.src='/assets/star.svg'">
+            <div class="rewards-product-photo"><img class="rewards-product-image" src="${safeHtml(rewardReferenceImage(r))}" alt="${safeHtml(r.name)}" onerror="this.onerror=null;this.src='/assets/star.svg'"></div>
             <div class="rewards-product-copy">
               <h3>${safeHtml(r.name)}</h3>
               <div class="rewards-product-price">${fmtStars(r.stars_price)} <span>★</span></div>
@@ -1304,7 +1304,7 @@ function renderPriceCheckResult(data, barcode, debug = null) {
   const image = product.image_url ? safeHtml(product.image_url) : '/assets/star.svg';
   slot.innerHTML = `
     <article class="price-check-product-card">
-      <img class="price-check-product-image" src="${image}" alt="${safeHtml(product.name)}" onerror="this.onerror=null;this.src='/assets/star.svg'">
+      <div class="price-check-product-media"><img class="price-check-product-image" src="${image}" alt="${safeHtml(product.name)}" onerror="this.onerror=null;this.src='/assets/star.svg'"></div>
       <div class="price-check-product-info">
         <div class="price-check-found">${scannerSvg('check')}<span>Товар знайдено</span></div>
         <h2>${safeHtml(product.name)}</h2>
