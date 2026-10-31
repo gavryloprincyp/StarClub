@@ -3561,7 +3561,7 @@ body.priceCheck-route{
   background:#fff;
   mix-blend-mode:normal;
 }
-@media(min-width:400px) {
+@media(min-width:420px) {
   .rewards-product-photo { width:110px;height:88px; }
 }
 @media(max-width:360px) {
